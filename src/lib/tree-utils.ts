@@ -43,6 +43,8 @@ export interface RecurringRuleItem {
   amount: number;
   description: string;
   frequency: "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY";
+  startDate: string;
+  endDate: string | null;
   nextRunDate: string;
   isSplit: boolean;
   businessSharePct: number;

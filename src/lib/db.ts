@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS recurring_rules (
   amount NUMERIC(14, 2) NOT NULL CHECK (amount >= 0),
   description TEXT NOT NULL,
   frequency TEXT NOT NULL CHECK (frequency IN ('DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY')),
+  start_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  end_date DATE,
   next_run_date DATE NOT NULL,
   is_split BOOLEAN NOT NULL DEFAULT FALSE,
   business_share_pct NUMERIC(5, 2) NOT NULL DEFAULT 0 CHECK (business_share_pct >= 0 AND business_share_pct <= 100),
@@ -129,6 +131,9 @@ CREATE TABLE IF NOT EXISTS recurring_rules (
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS start_date DATE NOT NULL DEFAULT CURRENT_DATE;
+ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS end_date DATE;
 
 CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_categories_user ON categories(user_id);
@@ -539,22 +544,26 @@ export async function seedDefaultUserWorkspace(
   }
 
   // 3. Seed sample recurring rules
+  const currentMonthStart = `${year}-${month}-01`;
+  const fiveYearEndDate = `${year + 5}-${month}-01`;
   const nextMonthDate = new Date(year, now.getMonth() + 1, 1).toISOString().slice(0, 10);
   await rawQuery(
     `INSERT INTO recurring_rules
-      (user_id, account_id, category_id, type, amount, description, frequency, next_run_date, is_split, business_share_pct, business_amount, active)
+      (user_id, account_id, category_id, type, amount, description, frequency, start_date, end_date, next_run_date, is_split, business_share_pct, business_amount, active)
      VALUES
-      ($1, $2, $3, 'EXPENSE', 1250.00, 'Apartment Rent (20% Home Office)', 'MONTHLY', $4, TRUE, 20, 250.00, TRUE),
-      ($1, $5, $6, 'EXPENSE', 69.00, 'Cloud Hosting & GitHub Copilot', 'MONTHLY', $4, FALSE, 100, 69.00, TRUE),
-      ($1, $2, $7, 'INCOME', 3600.00, 'Monthly Net Salary', 'MONTHLY', $4, FALSE, 0, 0.00, TRUE)`,
+      ($1, $2, $3, 'EXPENSE', 1250.00, 'Apartment Rent (20% Home Office)', 'MONTHLY', $4, $8, $9, TRUE, 20, 250.00, TRUE),
+      ($1, $5, $6, 'EXPENSE', 69.00, 'Cloud Hosting & GitHub Copilot', 'MONTHLY', $4, NULL, $9, FALSE, 100, 69.00, TRUE),
+      ($1, $2, $7, 'INCOME', 3600.00, 'Monthly Net Salary', 'MONTHLY', $4, NULL, $9, FALSE, 0, 0.00, TRUE)`,
     [
       userId,
       privCheckingId,
       rentRes.rows[0].id,
-      nextMonthDate,
+      currentMonthStart,
       bizAccountId,
       softwareRes.rows[0].id,
       salaryRes.rows[0].id,
+      fiveYearEndDate,
+      nextMonthDate,
     ]
   );
 }

@@ -9,6 +9,8 @@ interface RecurringRuleRow {
   amount: string;
   description: string;
   frequency: "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY";
+  start_date: string | Date;
+  end_date: string | Date | null;
   next_run_date: string | Date;
   is_split: boolean;
   business_share_pct: string;
@@ -58,40 +60,63 @@ export async function processDueRecurringRules(userId: string): Promise<number> 
   let createdCount = 0;
 
   for (const rule of rulesRes.rows) {
+    const startDate = rule.start_date ? parseYMD(rule.start_date) : null;
+    const endDate = rule.end_date ? parseYMD(rule.end_date) : null;
     let runDate = parseYMD(rule.next_run_date);
+
+    if (startDate && runDate.getTime() < startDate.getTime()) {
+      runDate = new Date(startDate.getTime());
+    }
+
+    // Fetch already-generated dates for this rule to prevent duplicates when editing start/next dates
+    const existingRes = await query<{ date: string }>(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM transactions WHERE user_id = $1 AND recurring_rule_id = $2`,
+      [userId, rule.id]
+    );
+    const existingDates = new Set(existingRes.rows.map((r) => r.date));
+
     let safetyCounter = 0;
 
-    while (runDate.getTime() <= todayDate.getTime() && safetyCounter < 36) {
+    while (
+      runDate.getTime() <= todayDate.getTime() &&
+      (!endDate || runDate.getTime() <= endDate.getTime()) &&
+      safetyCounter < 500
+    ) {
       const dateStr = formatDateYMD(runDate);
-      await query(
-        `INSERT INTO transactions
-          (user_id, account_id, category_id, type, amount, description, notes, date, is_split, business_share_pct, business_amount, recurring_rule_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-        [
-          userId,
-          rule.account_id,
-          rule.category_id,
-          rule.type,
-          rule.amount,
-          rule.description,
-          `Auto-generated (${rule.frequency.toLowerCase()} recurring)`,
-          dateStr,
-          rule.is_split,
-          rule.business_share_pct,
-          rule.business_amount,
-          rule.id,
-        ]
-      );
-      createdCount++;
+      if (!existingDates.has(dateStr)) {
+        await query(
+          `INSERT INTO transactions
+            (user_id, account_id, category_id, type, amount, description, notes, date, is_split, business_share_pct, business_amount, recurring_rule_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [
+            userId,
+            rule.account_id,
+            rule.category_id,
+            rule.type,
+            rule.amount,
+            rule.description,
+            `Auto-generated (${rule.frequency.toLowerCase()} recurring)`,
+            dateStr,
+            rule.is_split,
+            rule.business_share_pct,
+            rule.business_amount,
+            rule.id,
+          ]
+        );
+        existingDates.add(dateStr);
+        createdCount++;
+      }
       safetyCounter++;
       runDate = advanceDate(runDate, rule.frequency);
     }
 
     const nextDateStr = formatDateYMD(runDate);
-    await query(`UPDATE recurring_rules SET next_run_date = $1 WHERE id = $2`, [
-      nextDateStr,
-      rule.id,
-    ]);
+    const hasExpired = Boolean(endDate && runDate.getTime() > endDate.getTime());
+
+    await query(
+      `UPDATE recurring_rules SET next_run_date = $1, active = $2 WHERE id = $3`,
+      [nextDateStr, hasExpired ? false : rule.active, rule.id]
+    );
   }
 
   return createdCount;

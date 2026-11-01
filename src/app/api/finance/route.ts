@@ -56,6 +56,8 @@ export async function GET() {
            amount::float8 AS amount,
            description,
            frequency,
+           to_char(start_date, 'YYYY-MM-DD') AS "startDate",
+           to_char(end_date, 'YYYY-MM-DD') AS "endDate",
            to_char(next_run_date, 'YYYY-MM-DD') AS "nextRunDate",
            is_split AS "isSplit",
            business_share_pct::float8 AS "businessSharePct",

@@ -154,15 +154,20 @@ export function FinFlowApp() {
 
   // Recurring Modal State
   const [recurringModalOpen, setRecurringModalOpen] = useState(false);
+  const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
   const [recDescription, setRecDescription] = useState("");
   const [recType, setRecType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [recAmount, setRecAmount] = useState("");
   const [recFrequency, setRecFrequency] = useState<RecurringRuleItem["frequency"]>("MONTHLY");
+  const [recStartDate, setRecStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [recEndDate, setRecEndDate] = useState("");
   const [recNextDate, setRecNextDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [recAccountId, setRecAccountId] = useState("");
   const [recCategoryId, setRecCategoryId] = useState<string | null>(null);
   const [recIsSplit, setRecIsSplit] = useState(false);
   const [recBusinessPct, setRecBusinessPct] = useState(50);
+  const [recActive, setRecActive] = useState(true);
+  const [recError, setRecError] = useState<string | null>(null);
 
   // Admin State
   const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
@@ -543,32 +548,92 @@ export function FinFlowApp() {
   };
 
   // Recurring Modal Handlers
+  const openNewRecurringModal = () => {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    setEditingRecurringId(null);
+    setRecDescription("");
+    setRecType("EXPENSE");
+    setRecAmount("");
+    setRecFrequency("MONTHLY");
+    setRecStartDate(todayStr);
+    setRecEndDate("");
+    setRecNextDate(todayStr);
+    setRecAccountId(accounts[0]?.id || "");
+    setRecCategoryId(selectedFolderId);
+    setRecIsSplit(false);
+    setRecBusinessPct(50);
+    setRecActive(true);
+    setRecError(null);
+    setRecurringModalOpen(true);
+  };
+
+  const openEditRecurringModal = (rule: RecurringRuleItem) => {
+    setEditingRecurringId(rule.id);
+    setRecDescription(rule.description);
+    setRecType(rule.type);
+    setRecAmount(String(rule.amount));
+    setRecFrequency(rule.frequency);
+    setRecStartDate(rule.startDate || rule.nextRunDate);
+    setRecEndDate(rule.endDate || "");
+    setRecNextDate(rule.nextRunDate);
+    setRecAccountId(rule.accountId);
+    setRecCategoryId(rule.categoryId);
+    setRecIsSplit(rule.isSplit);
+    setRecBusinessPct(rule.businessSharePct);
+    setRecActive(rule.active);
+    setRecError(null);
+    setRecurringModalOpen(true);
+  };
+
+  const applyDurationYearsPreset = (years: number | null) => {
+    if (years === null) {
+      setRecEndDate("");
+      return;
+    }
+    const baseStr = recStartDate || new Date().toISOString().slice(0, 10);
+    const [y, m, d] = baseStr.split("-").map(Number);
+    const target = new Date(Date.UTC(y + years, m - 1, d));
+    const endStr = target.toISOString().slice(0, 10);
+    setRecEndDate(endStr);
+  };
+
   const handleSaveRecurring = async (e: React.FormEvent) => {
     e.preventDefault();
+    setRecError(null);
     const numericAmount = parseFloat(recAmount);
     if (!recAccountId || !recDescription.trim() || isNaN(numericAmount) || numericAmount <= 0)
       return;
 
+    if (recEndDate && recEndDate < recStartDate) {
+      setRecError("End date cannot be earlier than start date.");
+      return;
+    }
+
     const res = await fetch("/api/recurring", {
-      method: "POST",
+      method: editingRecurringId ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        id: editingRecurringId,
         accountId: recAccountId,
         categoryId: recCategoryId,
         type: recType,
         amount: numericAmount,
         description: recDescription,
         frequency: recFrequency,
-        nextRunDate: recNextDate,
+        startDate: recStartDate,
+        endDate: recEndDate ? recEndDate : null,
+        nextRunDate: editingRecurringId ? recNextDate : recStartDate,
         isSplit: recIsSplit,
         businessSharePct: recBusinessPct,
+        active: recActive,
       }),
     });
     if (res.ok) {
       setRecurringModalOpen(false);
-      setRecDescription("");
-      setRecAmount("");
       await loadFinanceData();
+    } else {
+      const errData = await res.json().catch(() => ({}));
+      setRecError(errData.error || "Failed to save recurring rule.");
     }
   };
 
@@ -1314,13 +1379,13 @@ export function FinFlowApp() {
                     Automated Recurring Transactions
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Subscriptions, rent, and salary rules are automatically posted when their due
-                    date arrives.
+                    Subscriptions, rent, and salary rules with configurable start and end dates
+                    (e.g. 5-year monthly contracts).
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setRecurringModalOpen(true)}
+                  onClick={openNewRecurringModal}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white"
                 >
                   <Plus className="w-4 h-4" />
@@ -1343,7 +1408,7 @@ export function FinFlowApp() {
                         className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex items-center justify-between gap-4"
                       >
                         <div className="min-w-0">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="text-sm font-semibold text-white truncate">
                               {rule.description}
                             </span>
@@ -1355,17 +1420,41 @@ export function FinFlowApp() {
                                 Split {rule.businessSharePct}% Biz
                               </span>
                             )}
+                            {!rule.active && (
+                              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
+                                Paused / Ended
+                              </span>
+                            )}
                           </div>
-                          <div className="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <div className="text-xs text-slate-400 mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
                             <span>Folder: {cat?.pathNames.join(" / ") || "Root"}</span>
                             <span>Account: {acc?.name || "Unknown"}</span>
-                            <span>Next Run: {rule.nextRunDate}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                            <span>
+                              Start:{" "}
+                              <strong className="text-slate-200 font-medium">
+                                {rule.startDate || rule.nextRunDate}
+                              </strong>
+                            </span>
+                            <span>
+                              End:{" "}
+                              <strong className="text-slate-200 font-medium">
+                                {rule.endDate ? rule.endDate : "No End Date (Ongoing)"}
+                              </strong>
+                            </span>
+                            <span>
+                              Next Run:{" "}
+                              <strong className="text-indigo-300 font-medium">
+                                {rule.nextRunDate}
+                              </strong>
+                            </span>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-3 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0">
                           <span
-                            className={`text-sm font-bold tabular-nums ${
+                            className={`text-sm font-bold tabular-nums mr-1 ${
                               rule.type === "INCOME" ? "text-emerald-400" : "text-rose-400"
                             }`}
                           >
@@ -1377,12 +1466,21 @@ export function FinFlowApp() {
                             checked={rule.active}
                             onChange={() => handleToggleRecurring(rule)}
                             title="Toggle rule active"
-                            className="w-4 h-4 accent-indigo-500"
+                            className="w-4 h-4 accent-indigo-500 cursor-pointer"
                           />
                           <button
                             type="button"
+                            onClick={() => openEditRecurringModal(rule)}
+                            title="Edit recurring rule"
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => handleDeleteRecurring(rule.id)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800"
+                            title="Delete recurring rule"
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -2021,14 +2119,24 @@ export function FinFlowApp() {
         </form>
       </LightDismissDialog>
 
-      {/* MODAL 4: NEW RECURRING RULE */}
+      {/* MODAL 4: NEW / EDIT RECURRING RULE */}
       <LightDismissDialog
         open={recurringModalOpen}
         onClose={() => setRecurringModalOpen(false)}
-        title="New Recurring Transaction Rule"
-        subtitle="Automatically generates expenses or income on schedule."
+        title={
+          editingRecurringId
+            ? "Edit Recurring Transaction Rule"
+            : "New Recurring Transaction Rule"
+        }
+        subtitle="Configure schedule, start & end dates (e.g. a 5-year monthly payment), and account split."
       >
         <form onSubmit={handleSaveRecurring} className="space-y-4">
+          {recError && (
+            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-200">
+              {recError}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
             <button
               type="button"
@@ -2055,16 +2163,18 @@ export function FinFlowApp() {
             <input
               type="text"
               required
-              placeholder="e.g. Office Rent, Netflix, Monthly Salary"
+              placeholder="e.g. Office Rent, Car Lease (5 Years), Monthly Salary"
               value={recDescription}
               onChange={(e) => setRecDescription(e.target.value)}
               className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white"
             />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Amount</label>
+              <label className="block text-xs font-medium text-slate-300 mb-1">
+                Amount ({currency})
+              </label>
               <input
                 type="number"
                 step="0.01"
@@ -2090,16 +2200,100 @@ export function FinFlowApp() {
                 <option value="DAILY">Daily</option>
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Next Run Date</label>
-              <input
-                type="date"
-                required
-                value={recNextDate}
-                onChange={(e) => setRecNextDate(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white"
-              />
+          </div>
+
+          {/* Start Date & End Date (with quick duration presets) */}
+          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Start Date</label>
+                <input
+                  type="date"
+                  required
+                  value={recStartDate}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setRecStartDate(val);
+                    if (!editingRecurringId) {
+                      setRecNextDate(val);
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-sm text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  End Date <span className="text-slate-500 font-normal">(Optional)</span>
+                </label>
+                <input
+                  type="date"
+                  min={recStartDate}
+                  value={recEndDate}
+                  onChange={(e) => setRecEndDate(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-sm text-white"
+                />
+              </div>
             </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <span className="text-[11px] text-slate-400">Quick Duration from Start Date:</span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => applyDurationYearsPreset(1)}
+                  className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 hover:text-white transition-colors"
+                >
+                  +1 Year
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyDurationYearsPreset(3)}
+                  className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 hover:text-white transition-colors"
+                >
+                  +3 Years
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyDurationYearsPreset(5)}
+                  className="px-2 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-[11px] text-indigo-300 font-medium transition-colors"
+                >
+                  +5 Years
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyDurationYearsPreset(null)}
+                  className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-400 hover:text-white transition-colors"
+                >
+                  No End Date
+                </button>
+              </div>
+            </div>
+
+            {editingRecurringId && (
+              <div className="pt-2 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Next Scheduled Run Date
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={recNextDate}
+                    onChange={(e) => setRecNextDate(e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white"
+                  />
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer sm:mt-5">
+                  <input
+                    type="checkbox"
+                    checked={recActive}
+                    onChange={(e) => setRecActive(e.target.checked)}
+                    className="w-4 h-4 accent-indigo-500"
+                  />
+                  <span className="text-xs text-slate-200">Rule is Active</span>
+                </label>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2177,7 +2371,7 @@ export function FinFlowApp() {
               type="submit"
               className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white"
             >
-              Save Recurring Rule
+              {editingRecurringId ? "Save Changes" : "Save Recurring Rule"}
             </button>
           </div>
         </form>

@@ -1,0 +1,149 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: #090d16;
+  color: #f1f5f9;
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+/* Fluid responsive heading utility following modern-web-guidance (responsive-design) */
+.fluid-heading {
+  font-size: clamp(1.25rem, 0.95rem + 1.2vw, 1.75rem);
+  line-height: 1.2;
+}
+
+/* Native <dialog> top-layer backdrop following modern-web-guidance (light-dismiss-a-dialog) */
+dialog::backdrop {
+  background-color: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+/* Responsive Data Table using @container queries following modern-web-guidance (responsive-table) */
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(640px, 78dvh);
+  container-type: inline-size;
+  border-radius: 0.75rem;
+}
+
+.responsive-finance-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  --label-2: "Category Folder";
+  --label-3: "Account";
+  --label-4: "Scope / Split";
+  --label-5: "Date";
+  --label-6: "Amount";
+  --label-7: "Actions";
+}
+
+.responsive-finance-table thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+  background-color: #0f172a;
+}
+
+.responsive-finance-table tbody th {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 1;
+  background-color: #111827;
+}
+
+@container (width < 640px) {
+  .responsive-finance-table,
+  .responsive-finance-table thead,
+  .responsive-finance-table tbody,
+  .responsive-finance-table tr,
+  .responsive-finance-table th,
+  .responsive-finance-table td {
+    display: block;
+  }
+
+  .responsive-finance-table thead {
+    /* MANDATORY: Hide column header from layout and screen readers on narrow containers */
+    display: none;
+  }
+
+  .responsive-finance-table tbody tr {
+    margin-block-end: 0.875rem;
+    border: 1px solid rgba(51, 65, 85, 0.7);
+    border-radius: 0.75rem;
+    background-color: rgba(15, 23, 42, 0.85);
+    overflow: hidden;
+  }
+
+  .responsive-finance-table tbody th {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 2;
+    background-color: #1e293b;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+  }
+
+  .responsive-finance-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid rgba(30, 41, 59, 0.6);
+    text-align: right;
+  }
+
+  .responsive-finance-table td:last-child {
+    border-bottom: none;
+  }
+
+  .responsive-finance-table td:nth-child(2)::before {
+    content: var(--label-2) ": ";
+    font-weight: 500;
+    color: #94a3b8;
+    text-align: left;
+  }
+
+  .responsive-finance-table td:nth-child(3)::before {
+    content: var(--label-3) ": ";
+    font-weight: 500;
+    color: #94a3b8;
+    text-align: left;
+  }
+
+  .responsive-finance-table td:nth-child(4)::before {
+    content: var(--label-4) ": ";
+    font-weight: 500;
+    color: #94a3b8;
+    text-align: left;
+  }
+
+  .responsive-finance-table td:nth-child(5)::before {
+    content: var(--label-5) ": ";
+    font-weight: 500;
+    color: #94a3b8;
+    text-align: left;
+  }
+
+  .responsive-finance-table td:nth-child(6)::before {
+    content: var(--label-6) ": ";
+    font-weight: 500;
+    color: #94a3b8;
+    text-align: left;
+  }
+
+  .responsive-finance-table td:nth-child(7)::before {
+    content: var(--label-7) ": ";
+    font-weight: 500;
+    color: #94a3b8;
+    text-align: left;
+  }
+}

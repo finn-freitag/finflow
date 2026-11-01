@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: finflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finflow_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-finflow}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finflow} -d ${POSTGRES_DB:-finflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: finflow-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-finflow}:${POSTGRES_PASSWORD:-finflow_secret}@db:5432/${POSTGRES_DB:-finflow}
+      JWT_SECRET: ${JWT_SECRET:-change-this-super-secret-jwt-key-in-production-min-32-chars}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+
+      # Optional: Automatically seed initial admin user on first launch.
+      # If left empty, the first visitor to the web UI will be guided through an interactive Admin Setup Wizard!
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+
+      # Initial registration & authentication mode ('both', 'builtin', or 'oidc')
+      # Can also be changed dynamically by the Admin in the web UI.
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      AUTH_MODE: ${AUTH_MODE:-both}
+
+      # Optional: OpenID Connect (OIDC) configuration (can also be configured in Admin UI)
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:3000/api/auth/oidc/callback}
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-Single Sign-On (OIDC)}
+
+volumes:
+  postgres_data:

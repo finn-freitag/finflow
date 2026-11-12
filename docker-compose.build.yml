@@ -1,0 +1,8 @@
+# Build the app image from this repository instead of pulling it from ghcr.io:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  app:
+    image: finflow:local
+    build:
+      context: .
+      dockerfile: Dockerfile

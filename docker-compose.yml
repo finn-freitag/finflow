@@ -1,3 +1,7 @@
+# FinFlow — app + PostgreSQL.
+# Usage: put this file and .env (copied from .env.example) in one folder, then:
+#   docker compose up -d                          # start
+#   docker compose pull && docker compose up -d   # update to the newest image
 services:
   db:
     image: postgres:16-alpine
@@ -16,9 +20,9 @@ services:
       retries: 10
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Prebuilt image from GitHub Actions. Pin a release with FINFLOW_VERSION (e.g. 1.2.0) in .env.
+    # To build from source instead, see docker-compose.build.yml.
+    image: ghcr.io/finn-freitag/finflow:${FINFLOW_VERSION:-latest}
     container_name: finflow-app
     restart: unless-stopped
     depends_on:

@@ -39,6 +39,7 @@ import {
   getDescendantCategoryIds,
   getEffectiveTransactionAmount,
   getYearlyMonthlySeries,
+  getMultiYearSeries,
   localTodayYMD,
   matchesPeriod,
 } from "@/lib/tree-utils";
@@ -322,6 +323,19 @@ export function FinFlowApp() {
         accountFilterId
       ),
     [transactions, selectedYear, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId]
+  );
+
+  const yearlySeries = useMemo(
+    () =>
+      getMultiYearSeries(
+        transactions,
+        new Date().getFullYear(),
+        allowedCategoryIds,
+        selectedFolderId === null,
+        scopeFilter,
+        accountFilterId
+      ),
+    [transactions, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId]
   );
 
   // Filtered transactions for the table
@@ -1343,6 +1357,11 @@ export function FinFlowApp() {
                   onSelectMonth={(month) => {
                     setPeriodMode("MONTH");
                     setSelectedMonth(month);
+                  }}
+                  yearlySeries={yearlySeries}
+                  onSelectYear={(year) => {
+                    setPeriodMode("YEAR");
+                    setSelectedYear(year);
                   }}
                   wide={treeWide}
                 />

@@ -406,33 +406,25 @@ const MONTH_LABELS = [
   "Dec",
 ];
 
-export function getYearlyMonthlySeries(
+function emptyPoint(monthIndex: number, label: string): MonthlyChartPoint {
+  return { monthIndex, label, expense: 0, income: 0, privateExpense: 0, businessExpense: 0, net: 0 };
+}
+
+/** Adds every matching transaction to the point `pick` returns for its date (or skips it on null). */
+function accumulateSeries(
   transactions: TransactionItem[],
-  year: number,
   allowedCategoryIds: Set<string | null>,
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL"
-): MonthlyChartPoint[] {
-  const points: MonthlyChartPoint[] = MONTH_LABELS.map((label, idx) => ({
-    monthIndex: idx + 1,
-    label,
-    expense: 0,
-    income: 0,
-    privateExpense: 0,
-    businessExpense: 0,
-    net: 0,
-  }));
-
+  accountFilterId: string | "ALL",
+  pick: (date: string) => MonthlyChartPoint | null
+) {
   for (const tx of transactions) {
     if (accountFilterId !== "ALL" && tx.accountId !== accountFilterId) continue;
     if (!includeAllCategories && !allowedCategoryIds.has(tx.categoryId)) continue;
 
-    const txYear = Number(tx.date.slice(0, 4));
-    if (txYear !== year) continue;
-
-    const monthIdx = Number(tx.date.slice(5, 7)) - 1;
-    if (monthIdx < 0 || monthIdx > 11) continue;
+    const pt = pick(tx.date);
+    if (!pt) continue;
 
     const { effectiveAmount, privateAmount, businessAmount } = getEffectiveTransactionAmount(
       tx,
@@ -440,7 +432,6 @@ export function getYearlyMonthlySeries(
     );
     if (effectiveAmount <= 0) continue;
 
-    const pt = points[monthIdx];
     if (tx.type === "EXPENSE") {
       pt.expense = Math.round((pt.expense + effectiveAmount) * 100) / 100;
       pt.privateExpense = Math.round((pt.privateExpense + privateAmount) * 100) / 100;
@@ -451,7 +442,68 @@ export function getYearlyMonthlySeries(
       pt.net = Math.round((pt.net + effectiveAmount) * 100) / 100;
     }
   }
+}
 
+export function getYearlyMonthlySeries(
+  transactions: TransactionItem[],
+  year: number,
+  allowedCategoryIds: Set<string | null>,
+  includeAllCategories: boolean,
+  scopeFilter: ScopeFilter,
+  accountFilterId: string | "ALL"
+): MonthlyChartPoint[] {
+  const points = MONTH_LABELS.map((label, idx) => emptyPoint(idx + 1, label));
+  accumulateSeries(
+    transactions,
+    allowedCategoryIds,
+    includeAllCategories,
+    scopeFilter,
+    accountFilterId,
+    (date) => {
+      if (Number(date.slice(0, 4)) !== year) return null;
+      return points[Number(date.slice(5, 7)) - 1] ?? null;
+    }
+  );
+  return points;
+}
+
+export interface YearlyChartPoint extends MonthlyChartPoint {
+  year: number;
+}
+
+/**
+ * One point per year, from the first year with any transaction up to the later of the last
+ * such year and `currentYear`, so the axis stays the same when switching folders.
+ */
+export function getMultiYearSeries(
+  transactions: TransactionItem[],
+  currentYear: number,
+  allowedCategoryIds: Set<string | null>,
+  includeAllCategories: boolean,
+  scopeFilter: ScopeFilter,
+  accountFilterId: string | "ALL"
+): YearlyChartPoint[] {
+  let first = currentYear;
+  let last = currentYear;
+  for (const tx of transactions) {
+    const y = Number(tx.date.slice(0, 4));
+    if (!Number.isFinite(y) || y < 1970) continue;
+    if (y < first) first = y;
+    if (y > last) last = y;
+  }
+
+  const points: YearlyChartPoint[] = [];
+  for (let y = first; y <= last; y++) {
+    points.push({ ...emptyPoint(0, String(y)), year: y });
+  }
+  accumulateSeries(
+    transactions,
+    allowedCategoryIds,
+    includeAllCategories,
+    scopeFilter,
+    accountFilterId,
+    (date) => points[Number(date.slice(0, 4)) - first] ?? null
+  );
   return points;
 }
 

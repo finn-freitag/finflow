@@ -28,8 +28,10 @@ export interface RecurringRuleRow {
   id: string;
   user_id: string;
   account_id: string;
+  /** Destination account of a recurring transfer. */
+  to_account_id: string | null;
   category_id: string | null;
-  type: "EXPENSE" | "INCOME";
+  type: "EXPENSE" | "INCOME" | "TRANSFER";
   amount: string;
   description: string;
   frequency: Frequency;
@@ -47,6 +49,7 @@ const RULE_COLUMNS = `
   id,
   user_id,
   account_id,
+  to_account_id,
   category_id,
   type,
   amount::text AS amount,
@@ -150,8 +153,8 @@ export async function syncRule(q: QueryFn, rule: RecurringRuleRow, today = local
       const res = await q(
         `INSERT INTO transactions
           (user_id, account_id, category_id, type, amount, description, notes, date,
-           is_split, business_share_pct, business_amount, recurring_rule_id, recurring_period)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           is_split, business_share_pct, business_amount, recurring_rule_id, recurring_period, to_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (recurring_rule_id, recurring_period)
            WHERE recurring_rule_id IS NOT NULL AND recurring_period IS NOT NULL
          DO NOTHING`,
@@ -169,6 +172,7 @@ export async function syncRule(q: QueryFn, rule: RecurringRuleRow, today = local
           rule.business_amount,
           rule.id,
           key,
+          rule.to_account_id,
         ]
       );
       covered.add(key);

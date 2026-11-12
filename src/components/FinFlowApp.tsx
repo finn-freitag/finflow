@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowDownRight,
+  ArrowLeftRight,
   ArrowUpRight,
   Briefcase,
   Calendar,
@@ -34,6 +35,7 @@ import {
   RecurringRuleItem,
   ScopeFilter,
   TransactionItem,
+  balanceEffect,
   buildCategoryTreeWithSums,
   formatCurrency,
   getDescendantCategoryIds,
@@ -42,6 +44,7 @@ import {
   getMultiYearSeries,
   localTodayYMD,
   matchesPeriod,
+  transactionTouchesAccount,
 } from "@/lib/tree-utils";
 import { CategoryTree } from "./CategoryTree";
 import { SpendingCharts } from "./SpendingCharts";
@@ -158,12 +161,13 @@ export function FinFlowApp() {
   const [txModalOpen, setTxModalOpen] = useState(false);
   const [editingTxId, setEditingTxId] = useState<string | null>(null);
   const [editingTxRuleId, setEditingTxRuleId] = useState<string | null>(null);
-  const [txType, setTxType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
+  const [txType, setTxType] = useState<"EXPENSE" | "INCOME" | "TRANSFER">("EXPENSE");
   const [txAmount, setTxAmount] = useState("");
   const [txDescription, setTxDescription] = useState("");
   const [txNotes, setTxNotes] = useState("");
   const [txDate, setTxDate] = useState(() => localTodayYMD());
   const [txAccountId, setTxAccountId] = useState("");
+  const [txToAccountId, setTxToAccountId] = useState("");
   const [txCategoryId, setTxCategoryId] = useState<string | null>(null);
   const [txIsSplit, setTxIsSplit] = useState(false);
   const [txBusinessPct, setTxBusinessPct] = useState(50);
@@ -189,12 +193,13 @@ export function FinFlowApp() {
   const [recurringModalOpen, setRecurringModalOpen] = useState(false);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
   const [recDescription, setRecDescription] = useState("");
-  const [recType, setRecType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
+  const [recType, setRecType] = useState<"EXPENSE" | "INCOME" | "TRANSFER">("EXPENSE");
   const [recAmount, setRecAmount] = useState("");
   const [recFrequency, setRecFrequency] = useState<RecurringRuleItem["frequency"]>("MONTHLY");
   const [recStartDate, setRecStartDate] = useState(() => localTodayYMD());
   const [recEndDate, setRecEndDate] = useState("");
   const [recAccountId, setRecAccountId] = useState("");
+  const [recToAccountId, setRecToAccountId] = useState("");
   const [recCategoryId, setRecCategoryId] = useState<string | null>(null);
   const [recIsSplit, setRecIsSplit] = useState(false);
   const [recBusinessPct, setRecBusinessPct] = useState(50);
@@ -299,8 +304,9 @@ export function FinFlowApp() {
         selectedYear,
         selectedMonth,
         accountFilterId,
+        accounts,
       }),
-    [categories, transactions, scopeFilter, periodMode, selectedYear, selectedMonth, accountFilterId]
+    [categories, transactions, scopeFilter, periodMode, selectedYear, selectedMonth, accountFilterId, accounts]
   );
 
   const activeNode: CategoryTreeNode = useMemo(
@@ -321,9 +327,10 @@ export function FinFlowApp() {
         allowedCategoryIds,
         selectedFolderId === null,
         scopeFilter,
-        accountFilterId
+        accountFilterId,
+        accounts
       ),
-    [transactions, selectedYear, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId]
+    [transactions, selectedYear, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId, accounts]
   );
 
   const yearlySeries = useMemo(
@@ -334,20 +341,32 @@ export function FinFlowApp() {
         allowedCategoryIds,
         selectedFolderId === null,
         scopeFilter,
-        accountFilterId
+        accountFilterId,
+        accounts
       ),
-    [transactions, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId]
+    [transactions, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId, accounts]
   );
 
   // Filtered transactions for the table
   const filteredTransactions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const accountScope = new Map(accounts.map((a) => [a.id, a.scope]));
     return transactions.filter((tx) => {
-      if (accountFilterId !== "ALL" && tx.accountId !== accountFilterId) return false;
+      if (!transactionTouchesAccount(tx, accountFilterId)) return false;
       if (!matchesPeriod(tx.date, periodMode, selectedYear, selectedMonth)) return false;
 
-      const { effectiveAmount } = getEffectiveTransactionAmount(tx, scopeFilter);
-      if (effectiveAmount <= 0) return false;
+      if (tx.type === "TRANSFER") {
+        // Transfers have no private/business split; show them when either account is in scope.
+        if (
+          scopeFilter !== "ALL" &&
+          accountScope.get(tx.accountId) !== scopeFilter &&
+          accountScope.get(tx.toAccountId ?? "") !== scopeFilter
+        )
+          return false;
+      } else {
+        const { effectiveAmount } = getEffectiveTransactionAmount(tx, scopeFilter);
+        if (effectiveAmount <= 0) return false;
+      }
 
       if (selectedFolderId !== null) {
         if (includeSubfoldersInTxList) {
@@ -360,7 +379,10 @@ export function FinFlowApp() {
       if (q) {
         const folderName =
           (tx.categoryId && nodeMap.get(tx.categoryId)?.pathNames.join(" ")) || "Root";
-        const accNameMatch = accounts.find((a) => a.id === tx.accountId)?.name || "";
+        const accNameMatch = accounts
+          .filter((a) => a.id === tx.accountId || a.id === tx.toAccountId)
+          .map((a) => a.name)
+          .join(" ");
         const hay = `${tx.description} ${tx.notes} ${folderName} ${accNameMatch}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
@@ -397,17 +419,18 @@ export function FinFlowApp() {
       });
     }
     for (const tx of transactions) {
-      const entry = map.get(tx.accountId);
-      if (!entry) continue;
-      entry.txCount += 1;
-      if (tx.type === "INCOME") {
-        entry.totalIn += tx.amount;
-        entry.balance += tx.amount;
-      } else {
-        entry.totalOut += tx.amount;
-        entry.balance -= tx.amount;
+      // A transfer touches two accounts: out of accountId, into toAccountId.
+      for (const accountId of tx.type === "TRANSFER" ? [tx.accountId, tx.toAccountId] : [tx.accountId]) {
+        const entry = accountId ? map.get(accountId) : undefined;
+        if (!entry) continue;
+        const delta = balanceEffect(tx, accountId!);
+        entry.txCount += 1;
+        entry.balance += delta;
+        if (delta >= 0) entry.totalIn += delta;
+        else entry.totalOut -= delta;
       }
     }
+    for (const entry of map.values()) entry.balance = Math.round(entry.balance * 100) / 100;
     return map;
   }, [accounts, transactions]);
 
@@ -423,8 +446,12 @@ export function FinFlowApp() {
     const ids = new Set(included.map((acc) => acc.id));
     let total = included.reduce((sum, acc) => sum + Number(acc.initialBalance || 0), 0);
     for (const tx of transactions) {
-      if (!ids.has(tx.accountId) || tx.date > today) continue;
-      total += tx.type === "INCOME" ? tx.amount : -tx.amount;
+      if (tx.date > today) continue;
+      // A transfer between two included accounts cancels out.
+      if (ids.has(tx.accountId)) total += balanceEffect(tx, tx.accountId);
+      if (tx.type === "TRANSFER" && tx.toAccountId && ids.has(tx.toAccountId)) {
+        total += balanceEffect(tx, tx.toAccountId);
+      }
     }
     const label =
       accountFilterId !== "ALL"
@@ -455,6 +482,7 @@ export function FinFlowApp() {
     setTxNotes("");
     setTxDate(localTodayYMD());
     setTxAccountId(accounts[0]?.id || "");
+    setTxToAccountId(accounts[1]?.id || "");
     setTxCategoryId(presetFolderId);
     setTxIsSplit(false);
     setTxBusinessPct(50);
@@ -471,6 +499,7 @@ export function FinFlowApp() {
     setTxNotes(tx.notes || "");
     setTxDate(tx.date);
     setTxAccountId(tx.accountId);
+    setTxToAccountId(tx.toAccountId || accounts.find((a) => a.id !== tx.accountId)?.id || "");
     setTxCategoryId(tx.categoryId);
     setTxIsSplit(tx.isSplit);
     setTxBusinessPct(tx.businessSharePct);
@@ -482,8 +511,13 @@ export function FinFlowApp() {
     e.preventDefault();
     const numericAmount = parseFloat(txAmount);
     if (!txAccountId || !txDescription.trim() || isNaN(numericAmount) || numericAmount <= 0) return;
+    const isTransfer = txType === "TRANSFER";
+    if (isTransfer && (!txToAccountId || txToAccountId === txAccountId)) {
+      window.alert("Choose two different accounts for the transfer.");
+      return;
+    }
 
-    const computedBizAmt = txIsSplit
+    const computedBizAmt = txIsSplit && !isTransfer
       ? txBusinessAmountInput !== ""
         ? parseFloat(txBusinessAmountInput)
         : Math.round(((numericAmount * txBusinessPct) / 100) * 100) / 100
@@ -492,13 +526,14 @@ export function FinFlowApp() {
     const payload = {
       id: editingTxId,
       accountId: txAccountId,
+      toAccountId: isTransfer ? txToAccountId : null,
       categoryId: txCategoryId,
       type: txType,
       amount: numericAmount,
       description: txDescription,
       notes: txNotes,
       date: txDate,
-      isSplit: txIsSplit,
+      isSplit: isTransfer ? false : txIsSplit,
       businessSharePct: txBusinessPct,
       businessAmount: computedBizAmt,
     };
@@ -642,7 +677,7 @@ export function FinFlowApp() {
     const ruleCount = recurringRules.filter((r) => r.accountId === id).length;
     if (
       !window.confirm(
-        `Delete account "${acc?.name ?? ""}"?\n\nThis permanently deletes its ${txCount} transaction(s) and ${ruleCount} recurring rule(s). This cannot be undone.`
+        `Delete account "${acc?.name ?? ""}"?\n\nThis permanently deletes its ${txCount} transaction(s) (including transfers to or from it) and ${ruleCount} recurring rule(s). This cannot be undone.`
       )
     )
       return;
@@ -666,6 +701,7 @@ export function FinFlowApp() {
     setRecStartDate(todayStr);
     setRecEndDate("");
     setRecAccountId(accounts[0]?.id || "");
+    setRecToAccountId(accounts[1]?.id || "");
     setRecCategoryId(selectedFolderId);
     setRecIsSplit(false);
     setRecBusinessPct(50);
@@ -683,6 +719,7 @@ export function FinFlowApp() {
     setRecStartDate(rule.startDate || rule.nextRunDate);
     setRecEndDate(rule.endDate || "");
     setRecAccountId(rule.accountId);
+    setRecToAccountId(rule.toAccountId || accounts.find((a) => a.id !== rule.accountId)?.id || "");
     setRecCategoryId(rule.categoryId);
     setRecIsSplit(rule.isSplit);
     setRecBusinessPct(rule.businessSharePct);
@@ -714,6 +751,11 @@ export function FinFlowApp() {
       setRecError("End date cannot be earlier than start date.");
       return;
     }
+    const isTransfer = recType === "TRANSFER";
+    if (isTransfer && (!recToAccountId || recToAccountId === recAccountId)) {
+      setRecError("Choose two different accounts for the transfer.");
+      return;
+    }
 
     const res = await fetch("/api/recurring", {
       method: editingRecurringId ? "PUT" : "POST",
@@ -721,6 +763,7 @@ export function FinFlowApp() {
       body: JSON.stringify({
         id: editingRecurringId,
         accountId: recAccountId,
+        toAccountId: isTransfer ? recToAccountId : null,
         categoryId: recCategoryId,
         type: recType,
         amount: numericAmount,
@@ -728,7 +771,7 @@ export function FinFlowApp() {
         frequency: recFrequency,
         startDate: recStartDate,
         endDate: recEndDate ? recEndDate : null,
-        isSplit: recIsSplit,
+        isSplit: isTransfer ? false : recIsSplit,
         businessSharePct: recBusinessPct,
         active: recActive,
       }),
@@ -1456,7 +1499,8 @@ export function FinFlowApp() {
                     scopeFilter,
                     currency,
                     openEditTransactionModal,
-                    handleDeleteTransaction
+                    handleDeleteTransaction,
+                    accountFilterId
                   )}
                 </div>
               </div>
@@ -1515,7 +1559,8 @@ export function FinFlowApp() {
                 scopeFilter,
                 currency,
                 openEditTransactionModal,
-                handleDeleteTransaction
+                handleDeleteTransaction,
+                accountFilterId
               )}
             </div>
           )}
@@ -1684,6 +1729,8 @@ export function FinFlowApp() {
                 ) : (
                   recurringRules.map((rule) => {
                     const acc = accounts.find((a) => a.id === rule.accountId);
+                    const isTransfer = rule.type === "TRANSFER";
+                    const toAcc = isTransfer ? accounts.find((a) => a.id === rule.toAccountId) : undefined;
                     const cat = rule.categoryId ? nodeMap.get(rule.categoryId) : rootNode;
                     return (
                       <div
@@ -1698,6 +1745,12 @@ export function FinFlowApp() {
                             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300">
                               {rule.frequency}
                             </span>
+                            {isTransfer && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300">
+                                <ArrowLeftRight className="w-3 h-3" />
+                                Transfer
+                              </span>
+                            )}
                             {rule.isSplit && (
                               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300">
                                 Split {rule.businessSharePct}% Biz
@@ -1717,7 +1770,13 @@ export function FinFlowApp() {
                           </div>
                           <div className="text-xs text-slate-400 mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
                             <span>Folder: {cat?.pathNames.join(" / ") || "Root"}</span>
-                            <span>Account: {acc?.name || "Unknown"}</span>
+                            {isTransfer ? (
+                              <span>
+                                Accounts: {acc?.name || "Unknown"} → {toAcc?.name || "Unknown"}
+                              </span>
+                            ) : (
+                              <span>Account: {acc?.name || "Unknown"}</span>
+                            )}
                           </div>
                           <div className="text-[11px] text-slate-400 mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
                             <span>
@@ -1747,10 +1806,10 @@ export function FinFlowApp() {
                         <div className="flex items-center gap-2 shrink-0">
                           <span
                             className={`text-sm font-bold tabular-nums mr-1 ${
-                              rule.type === "INCOME" ? "text-emerald-400" : "text-rose-400"
+                              isTransfer ? "text-sky-300" : rule.type === "INCOME" ? "text-emerald-400" : "text-rose-400"
                             }`}
                           >
-                            {rule.type === "INCOME" ? "+" : "-"}
+                            {isTransfer ? "" : rule.type === "INCOME" ? "+" : "-"}
                             {formatCurrency(rule.amount, currency)}
                           </span>
                           <input
@@ -2030,8 +2089,12 @@ export function FinFlowApp() {
       <LightDismissDialog
         open={txModalOpen}
         onClose={() => setTxModalOpen(false)}
-        title={editingTxId ? "Edit Transaction" : "Add Expense or Income"}
-        subtitle="Assign to any Category Tree folder (or Root) and Private/Business account."
+        title={editingTxId ? "Edit Transaction" : "Add Transaction"}
+        subtitle={
+          txType === "TRANSFER"
+            ? "Move money between two of your accounts. Transfers are not counted as income or expense."
+            : "Assign to any Category Tree folder (or Root) and Private/Business account."
+        }
       >
         <form onSubmit={handleSaveTransaction} className="space-y-4">
           {editingTxId && editingTxRuleId && (
@@ -2041,7 +2104,7 @@ export function FinFlowApp() {
               &quot;. Your changes to this entry are kept even if the rule is edited later.
             </div>
           )}
-          <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
+          <div className="grid grid-cols-3 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
             <button
               type="button"
               onClick={() => setTxType("EXPENSE")}
@@ -2063,6 +2126,25 @@ export function FinFlowApp() {
               }`}
             >
               Income (+)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setTxType("TRANSFER");
+                if (!txToAccountId || txToAccountId === txAccountId) {
+                  setTxToAccountId(accounts.find((a) => a.id !== txAccountId)?.id || "");
+                }
+              }}
+              disabled={accounts.length < 2 && txType !== "TRANSFER"}
+              title={accounts.length < 2 ? "Add a second account to move money between accounts" : undefined}
+              className={`py-2 rounded-lg text-xs font-semibold transition-colors inline-flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed ${
+                txType === "TRANSFER"
+                  ? "bg-sky-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+              Transfer
             </button>
           </div>
 
@@ -2113,11 +2195,15 @@ export function FinFlowApp() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">
-                Bank / Payment Account
+                {txType === "TRANSFER" ? "From Account" : "Bank / Payment Account"}
               </label>
               <select
                 value={txAccountId}
-                onChange={(e) => setTxAccountId(e.target.value)}
+                onChange={(e) => {
+                  // Picking the destination as source swaps the two accounts of a transfer.
+                  if (txType === "TRANSFER" && e.target.value === txToAccountId) setTxToAccountId(txAccountId);
+                  setTxAccountId(e.target.value);
+                }}
                 required
                 className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white"
               >
@@ -2129,7 +2215,27 @@ export function FinFlowApp() {
               </select>
             </div>
 
-            <div>
+            {txType === "TRANSFER" && (
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">To Account</label>
+                <select
+                  value={txToAccountId}
+                  onChange={(e) => setTxToAccountId(e.target.value)}
+                  required
+                  className={`w-full px-3 py-2 rounded-xl bg-slate-950 border text-sm text-white ${
+                    txToAccountId === txAccountId ? "border-rose-500/70" : "border-slate-800"
+                  }`}
+                >
+                  {accounts.map((acc) => (
+                    <option key={acc.id} value={acc.id} disabled={acc.id === txAccountId}>
+                      {acc.name} ({acc.scope})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className={txType === "TRANSFER" ? "sm:col-span-2" : ""}>
               <label className="block text-xs font-medium text-slate-300 mb-1">
                 Category Folder
               </label>
@@ -2150,7 +2256,8 @@ export function FinFlowApp() {
             </div>
           </div>
 
-          {/* Private vs Business Split Configuration */}
+          {/* Private vs Business Split Configuration (not for transfers: they are neither income nor expense) */}
+          {txType !== "TRANSFER" && (
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
             <label className="flex items-center justify-between gap-2 cursor-pointer">
               <div className="flex items-center gap-2">
@@ -2228,6 +2335,7 @@ export function FinFlowApp() {
               </div>
             )}
           </div>
+          )}
 
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1">
@@ -2436,7 +2544,7 @@ export function FinFlowApp() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
+          <div className="grid grid-cols-3 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
             <button
               type="button"
               onClick={() => setRecType("EXPENSE")}
@@ -2444,7 +2552,7 @@ export function FinFlowApp() {
                 recType === "EXPENSE" ? "bg-rose-600 text-white" : "text-slate-400"
               }`}
             >
-              Recurring Expense
+              Expense
             </button>
             <button
               type="button"
@@ -2453,7 +2561,24 @@ export function FinFlowApp() {
                 recType === "INCOME" ? "bg-emerald-600 text-white" : "text-slate-400"
               }`}
             >
-              Recurring Income
+              Income
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRecType("TRANSFER");
+                if (!recToAccountId || recToAccountId === recAccountId) {
+                  setRecToAccountId(accounts.find((a) => a.id !== recAccountId)?.id || "");
+                }
+              }}
+              disabled={accounts.length < 2 && recType !== "TRANSFER"}
+              title={accounts.length < 2 ? "Add a second account to move money between accounts" : undefined}
+              className={`py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed ${
+                recType === "TRANSFER" ? "bg-sky-600 text-white" : "text-slate-400"
+              }`}
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+              Transfer
             </button>
           </div>
 
@@ -2462,7 +2587,11 @@ export function FinFlowApp() {
             <input
               type="text"
               required
-              placeholder="e.g. Office Rent, Car Lease (5 Years), Monthly Salary"
+              placeholder={
+                recType === "TRANSFER"
+                  ? "e.g. Monthly savings, Pocket money to cash"
+                  : "e.g. Office Rent, Car Lease (5 Years), Monthly Salary"
+              }
               value={recDescription}
               onChange={(e) => setRecDescription(e.target.value)}
               className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white"
@@ -2591,10 +2720,16 @@ export function FinFlowApp() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Account</label>
+              <label className="block text-xs font-medium text-slate-300 mb-1">
+                {recType === "TRANSFER" ? "From Account" : "Account"}
+              </label>
               <select
                 value={recAccountId}
-                onChange={(e) => setRecAccountId(e.target.value)}
+                onChange={(e) => {
+                  // Picking the destination as source swaps the two accounts of a transfer.
+                  if (recType === "TRANSFER" && e.target.value === recToAccountId) setRecToAccountId(recAccountId);
+                  setRecAccountId(e.target.value);
+                }}
                 className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white"
               >
                 {accounts.map((acc) => (
@@ -2604,7 +2739,25 @@ export function FinFlowApp() {
                 ))}
               </select>
             </div>
-            <div>
+            {recType === "TRANSFER" && (
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">To Account</label>
+                <select
+                  value={recToAccountId}
+                  onChange={(e) => setRecToAccountId(e.target.value)}
+                  className={`w-full px-3 py-2 rounded-xl bg-slate-950 border text-sm text-white ${
+                    recToAccountId === recAccountId ? "border-rose-500/70" : "border-slate-800"
+                  }`}
+                >
+                  {accounts.map((acc) => (
+                    <option key={acc.id} value={acc.id} disabled={acc.id === recAccountId}>
+                      {acc.name} ({acc.scope})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className={recType === "TRANSFER" ? "sm:col-span-2" : ""}>
               <label className="block text-xs font-medium text-slate-300 mb-1">
                 Category Folder
               </label>
@@ -2625,6 +2778,7 @@ export function FinFlowApp() {
             </div>
           </div>
 
+          {recType !== "TRANSFER" && (
           <label className="flex items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
             <span className="text-xs text-slate-200">Split Private / Business Share</span>
             <input
@@ -2634,8 +2788,9 @@ export function FinFlowApp() {
               className="w-4 h-4 accent-indigo-500"
             />
           </label>
+          )}
 
-          {recIsSplit && (
+          {recIsSplit && recType !== "TRANSFER" && (
             <div>
               <label className="block text-xs text-slate-300 mb-1">
                 Business Share: {recBusinessPct}%
@@ -2837,7 +2992,8 @@ function renderResponsiveTransactionsTable(
   scopeFilter: ScopeFilter,
   currency: string,
   onEdit: (tx: TransactionItem) => void,
-  onDelete: (tx: TransactionItem) => void
+  onDelete: (tx: TransactionItem) => void,
+  accountFilterId: string | "ALL" = "ALL"
 ) {
   if (transactions.length === 0) {
     return (
@@ -2873,7 +3029,18 @@ function renderResponsiveTransactionsTable(
           {transactions.map((tx) => {
             const folder = (tx.categoryId && nodeMap.get(tx.categoryId)) || nodeMap.get(null);
             const acc = accounts.find((a) => a.id === tx.accountId);
-            const { effectiveAmount } = getEffectiveTransactionAmount(tx, scopeFilter);
+            const isTransfer = tx.type === "TRANSFER";
+            const toAcc = isTransfer ? accounts.find((a) => a.id === tx.toAccountId) : undefined;
+            const effectiveAmount = isTransfer
+              ? tx.amount
+              : getEffectiveTransactionAmount(tx, scopeFilter).effectiveAmount;
+            // Viewing one account: a transfer is money leaving (-) or arriving (+) there.
+            const transferSign =
+              isTransfer && accountFilterId !== "ALL"
+                ? tx.accountId === accountFilterId
+                  ? "-"
+                  : "+"
+                : "";
             const privPct = Math.round(100 - tx.businessSharePct);
             const bizPct = Math.round(tx.businessSharePct);
 
@@ -2909,10 +3076,23 @@ function renderResponsiveTransactionsTable(
                   </span>
                 </td>
                 <td className="py-3 px-3 text-slate-300">
-                  <span className="font-medium">{acc?.name || "Account"}</span>
+                  {isTransfer ? (
+                    <span className="inline-flex flex-wrap items-center gap-1 font-medium">
+                      <span>{acc?.name || "Account"}</span>
+                      <span className="text-sky-400" aria-label="to">→</span>
+                      <span>{toAcc?.name || "Account"}</span>
+                    </span>
+                  ) : (
+                    <span className="font-medium">{acc?.name || "Account"}</span>
+                  )}
                 </td>
                 <td className="py-3 px-3">
-                  {tx.isSplit ? (
+                  {isTransfer ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                      <ArrowLeftRight className="w-3 h-3" />
+                      Transfer
+                    </span>
+                  ) : tx.isSplit ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
                       Split: {privPct}% Priv / {bizPct}% Biz
                     </span>
@@ -2930,10 +3110,11 @@ function renderResponsiveTransactionsTable(
                 <td className="py-3 px-3 text-right tabular-nums">
                   <div
                     className={`font-semibold text-sm ${
-                      tx.type === "INCOME" ? "text-emerald-400" : "text-rose-400"
+                      isTransfer ? "text-sky-300" : tx.type === "INCOME" ? "text-emerald-400" : "text-rose-400"
                     }`}
+                    title={isTransfer ? "Transfer between your accounts (not income or expense)" : undefined}
                   >
-                    {tx.type === "INCOME" ? "+" : "-"}
+                    {isTransfer ? transferSign : tx.type === "INCOME" ? "+" : "-"}
                     {formatCurrency(effectiveAmount, currency)}
                   </div>
                   {scopeFilter !== "ALL" && tx.isSplit && (

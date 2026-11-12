@@ -78,14 +78,14 @@ export async function PUT(req: NextRequest) {
         `UPDATE transactions
          SET business_share_pct = $1::numeric,
              business_amount = CASE WHEN $1::numeric = 100 THEN amount ELSE 0 END
-         WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE`,
+         WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE AND type <> 'TRANSFER'`,
         [defaultBizPct, id, user.id]
       );
       await q(
         `UPDATE recurring_rules
          SET business_share_pct = $1::numeric,
              business_amount = CASE WHEN $1::numeric = 100 THEN amount ELSE 0 END
-         WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE`,
+         WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE AND type <> 'TRANSFER'`,
         [defaultBizPct, id, user.id]
       );
       return updated;

@@ -14,8 +14,10 @@ import { accountScopeForUser, isOwnCategoryOrRoot, isUuid, parseAmount } from "@
 
 interface RuleInput {
   accountId: string;
+  /** Destination account; set only for transfers. */
+  toAccountId: string | null;
   categoryId: string | null;
-  type: "EXPENSE" | "INCOME";
+  type: "EXPENSE" | "INCOME" | "TRANSFER";
   amount: number;
   description: string;
   frequency: Frequency;
@@ -31,7 +33,8 @@ type ParseResult = { ok: true; input: RuleInput } | { ok: false; status: number;
 async function parseRuleInput(body: Record<string, unknown>, userId: string): Promise<ParseResult> {
   const accountId = String(body.accountId || "");
   const categoryId = body.categoryId ? String(body.categoryId) : null;
-  const type = body.type === "INCOME" ? "INCOME" : "EXPENSE";
+  const type = body.type === "INCOME" ? "INCOME" : body.type === "TRANSFER" ? "TRANSFER" : "EXPENSE";
+  const toAccountId = type === "TRANSFER" ? String(body.toAccountId || "") : null;
   const amount = Math.abs(parseAmount(body.amount));
   const description = String(body.description || "").trim();
   const frequency = FREQUENCIES.includes(body.frequency as Frequency)
@@ -56,10 +59,20 @@ async function parseRuleInput(body: Record<string, unknown>, userId: string): Pr
   if (!(await isOwnCategoryOrRoot(categoryId, userId))) {
     return { ok: false, status: 404, error: "Category folder not found." };
   }
+  if (type === "TRANSFER") {
+    if (!toAccountId) return { ok: false, status: 400, error: "Choose the account the money goes to." };
+    if (toAccountId === accountId) {
+      return { ok: false, status: 400, error: "A transfer needs two different accounts." };
+    }
+    if (!(await accountScopeForUser(toAccountId, userId))) {
+      return { ok: false, status: 404, error: "Destination account not found." };
+    }
+  }
 
-  let businessSharePct = accountScope === "BUSINESS" ? 100 : 0;
-  let businessAmount = accountScope === "BUSINESS" ? amount : 0;
-  if (isSplit) {
+  // Transfers are neither income nor expense, so they never carry a private/business share.
+  let businessSharePct = type !== "TRANSFER" && accountScope === "BUSINESS" ? 100 : 0;
+  let businessAmount = type !== "TRANSFER" && accountScope === "BUSINESS" ? amount : 0;
+  if (isSplit && type !== "TRANSFER") {
     const pct = Number(body.businessSharePct ?? 50);
     businessSharePct = Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 50));
     businessAmount = Math.round(((amount * businessSharePct) / 100) * 100) / 100;
@@ -69,6 +82,7 @@ async function parseRuleInput(body: Record<string, unknown>, userId: string): Pr
     ok: true,
     input: {
       accountId,
+      toAccountId,
       categoryId,
       type,
       amount,
@@ -76,7 +90,7 @@ async function parseRuleInput(body: Record<string, unknown>, userId: string): Pr
       frequency,
       startDate,
       endDate,
-      isSplit,
+      isSplit: isSplit && type !== "TRANSFER",
       businessSharePct,
       businessAmount,
     },
@@ -96,8 +110,8 @@ export async function POST(req: NextRequest) {
       const ins = await q<{ id: string }>(
         `INSERT INTO recurring_rules
           (user_id, account_id, category_id, type, amount, description, frequency, start_date, end_date,
-           next_run_date, is_split, business_share_pct, business_amount, active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $10, $11, $12, TRUE)
+           next_run_date, is_split, business_share_pct, business_amount, active, to_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $10, $11, $12, TRUE, $13)
          RETURNING id`,
         [
           user.id,
@@ -112,6 +126,7 @@ export async function POST(req: NextRequest) {
           r.isSplit,
           r.businessSharePct,
           r.businessAmount,
+          r.toAccountId,
         ]
       );
       const rule = await loadRule(q, ins.rows[0].id, user.id);
@@ -164,7 +179,8 @@ export async function PUT(req: NextRequest) {
              end_date = $8,
              is_split = $9,
              business_share_pct = $10,
-             business_amount = $11
+             business_amount = $11,
+             to_account_id = $14
          WHERE id = $12 AND user_id = $13`,
         [
           r.accountId,
@@ -180,6 +196,7 @@ export async function PUT(req: NextRequest) {
           r.businessAmount,
           id,
           user.id,
+          r.toAccountId,
         ]
       );
 

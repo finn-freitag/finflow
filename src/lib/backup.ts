@@ -10,11 +10,13 @@ import { FREQUENCIES, Frequency, isValidYMD } from "./recurring-schedule";
  */
 
 export const BACKUP_FORMAT = "finflow-backup";
-export const BACKUP_VERSION = 1;
+// Version 2 added transfers (type "TRANSFER" with toAccountId) for transactions and recurring
+// rules; version 1 files still import.
+export const BACKUP_VERSION = 2;
 
 const ACCOUNT_TYPES = ["CHECKING", "SAVINGS", "CREDIT_CARD", "CASH", "INVESTMENT"] as const;
 const SCOPES = ["PRIVATE", "BUSINESS"] as const;
-const TX_TYPES = ["EXPENSE", "INCOME"] as const;
+const TX_TYPES = ["EXPENSE", "INCOME", "TRANSFER"] as const;
 const MAX_RECORDS = 500_000;
 
 export interface BackupAccount {
@@ -41,6 +43,8 @@ export interface BackupCategory {
 export interface BackupRecurringRule {
   id: string;
   accountId: string;
+  /** Destination account of a recurring transfer; null for income and expenses. */
+  toAccountId: string | null;
   categoryId: string | null;
   type: (typeof TX_TYPES)[number];
   amount: number;
@@ -64,6 +68,8 @@ export interface BackupRecurringSkip {
 export interface BackupTransaction {
   id: string;
   accountId: string;
+  /** Destination account of a transfer; null for income and expenses. */
+  toAccountId: string | null;
   categoryId: string | null;
   type: (typeof TX_TYPES)[number];
   amount: number;
@@ -118,7 +124,8 @@ export async function exportUserData(userId: string): Promise<BackupFile> {
       [userId]
     ),
     query<BackupRecurringRule>(
-      `SELECT id, account_id AS "accountId", category_id AS "categoryId", type,
+      `SELECT id, account_id AS "accountId", to_account_id AS "toAccountId",
+              category_id AS "categoryId", type,
               amount::float8 AS amount, description, frequency,
               to_char(start_date, 'YYYY-MM-DD') AS "startDate",
               to_char(end_date, 'YYYY-MM-DD') AS "endDate",
@@ -135,7 +142,8 @@ export async function exportUserData(userId: string): Promise<BackupFile> {
       [userId]
     ),
     query<BackupTransaction>(
-      `SELECT id, account_id AS "accountId", category_id AS "categoryId", type,
+      `SELECT id, account_id AS "accountId", to_account_id AS "toAccountId",
+              category_id AS "categoryId", type,
               amount::float8 AS amount, description, notes,
               to_char(date, 'YYYY-MM-DD') AS date, is_split AS "isSplit",
               business_share_pct::float8 AS "businessSharePct",
@@ -345,6 +353,19 @@ export function validateBackup(raw: unknown): BackupFile {
     if (!accountIds.has(id)) fail(`${p}.accountId`, `refers to unknown account "${id}"`);
     return id;
   };
+  /** Destination account of a transfer (null for income/expense), checked against accountId. */
+  const transferTarget = (o: Obj, p: string, type: string, accountId: string) => {
+    if (type !== "TRANSFER") return null;
+    const toAccountId = str(o, "toAccountId", p, { max: 100 });
+    if (!accountIds.has(toAccountId)) fail(`${p}.toAccountId`, `refers to unknown account "${toAccountId}"`);
+    if (toAccountId === accountId) fail(`${p}.toAccountId`, "must differ from accountId");
+    return toAccountId;
+  };
+  // Transfers are neither income nor expense, so they never carry a private/business split.
+  const shares = (o: Obj, p: string, type: string, amount: number, isSplit: boolean, accountId: string) =>
+    type === "TRANSFER"
+      ? { isSplit: false, businessSharePct: 0, businessAmount: 0 }
+      : { isSplit, ...splitShares(o, p, amount, isSplit, accountScope.get(accountId)!) };
   const categoryRef = (o: Obj, p: string) => {
     const id = optRef(o, "categoryId", p);
     if (id !== null && !categoryIds.has(id)) fail(`${p}.categoryId`, `refers to unknown folder "${id}"`);
@@ -367,18 +388,19 @@ export function validateBackup(raw: unknown): BackupFile {
     const endDate = date(o, "endDate", p, false);
     if (endDate && endDate < startDate) fail(`${p}.endDate`, "is before startDate");
     const active = bool(o, "active", true);
+    const type = oneOf(o, "type", TX_TYPES, p);
     return {
       id,
       accountId,
+      toAccountId: transferTarget(o, p, type, accountId),
       categoryId: categoryRef(o, p),
-      type: oneOf(o, "type", TX_TYPES, p),
+      type,
       amount,
       description: str(o, "description", p, { max: 500 }),
       frequency,
       startDate,
       endDate,
-      isSplit,
-      ...splitShares(o, p, amount, isSplit, accountScope.get(accountId)!),
+      ...shares(o, p, type, amount, isSplit, accountId),
       active,
       pausedSince: active ? null : date(o, "pausedSince", p, false),
       createdAt: timestamp(o, "createdAt") ?? "",
@@ -428,17 +450,19 @@ export function validateBackup(raw: unknown): BackupFile {
       recurringPeriod = null;
     }
 
+    const type = oneOf(o, "type", TX_TYPES, p);
+
     return {
       id,
       accountId,
+      toAccountId: transferTarget(o, p, type, accountId),
       categoryId: categoryRef(o, p),
-      type: oneOf(o, "type", TX_TYPES, p),
+      type,
       amount,
       description: str(o, "description", p, { max: 500 }),
       notes: str(o, "notes", p, { max: 5000, allowEmpty: true, fallback: "" }),
       date: date(o, "date", p, true)!,
-      isSplit,
-      ...splitShares(o, p, amount, isSplit, accountScope.get(accountId)!),
+      ...shares(o, p, type, amount, isSplit, accountId),
       recurringRuleId,
       recurringPeriod,
       recurringModified: recurringRuleId ? bool(o, "recurringModified", false) : false,
@@ -524,12 +548,13 @@ export async function importUserData(userId: string, data: BackupFile): Promise<
       [
         "id", "user_id", "account_id", "category_id", "type", "amount", "description", "frequency",
         "start_date", "end_date", "next_run_date", "is_split", "business_share_pct", "business_amount",
-        "active", "paused_since", "created_at",
+        "active", "paused_since", "created_at", "to_account_id",
       ],
       data.recurringRules.map((r) => [
         ruleMap.get(r.id), userId, accountMap.get(r.accountId), catRef(r.categoryId), r.type, r.amount,
         r.description, r.frequency, r.startDate, r.endDate, r.startDate, r.isSplit, r.businessSharePct,
         r.businessAmount, r.active, r.active ? null : r.pausedSince, ts(r.createdAt),
+        r.toAccountId ? accountMap.get(r.toAccountId) : null,
       ])
     );
 
@@ -546,13 +571,13 @@ export async function importUserData(userId: string, data: BackupFile): Promise<
       [
         "id", "user_id", "account_id", "category_id", "type", "amount", "description", "notes", "date",
         "is_split", "business_share_pct", "business_amount", "recurring_rule_id", "recurring_period",
-        "recurring_modified", "created_at",
+        "recurring_modified", "created_at", "to_account_id",
       ],
       data.transactions.map((t) => [
         randomUUID(), userId, accountMap.get(t.accountId), catRef(t.categoryId), t.type, t.amount,
         t.description, t.notes, t.date, t.isSplit, t.businessSharePct, t.businessAmount,
         t.recurringRuleId ? ruleMap.get(t.recurringRuleId) : null, t.recurringPeriod,
-        t.recurringModified, ts(t.createdAt),
+        t.recurringModified, ts(t.createdAt), t.toAccountId ? accountMap.get(t.toAccountId) : null,
       ])
     );
 

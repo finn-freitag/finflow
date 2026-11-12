@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
-  type TEXT NOT NULL CHECK (type IN ('EXPENSE', 'INCOME')),
+  type TEXT NOT NULL CHECK (type IN ('EXPENSE', 'INCOME', 'TRANSFER')),
   amount NUMERIC(14, 2) NOT NULL CHECK (amount >= 0),
   description TEXT NOT NULL,
   notes TEXT NOT NULL DEFAULT '',
@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS recurring_rules (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
-  type TEXT NOT NULL CHECK (type IN ('EXPENSE', 'INCOME')),
+  type TEXT NOT NULL CHECK (type IN ('EXPENSE', 'INCOME', 'TRANSFER')),
   amount NUMERIC(14, 2) NOT NULL CHECK (amount >= 0),
   description TEXT NOT NULL,
   frequency TEXT NOT NULL CHECK (frequency IN ('DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY')),
@@ -180,6 +180,21 @@ ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS paused_since DATE;
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_period TEXT;
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_modified BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Transfers: one row that moves money from account_id to to_account_id. They are neither income
+-- nor expense. Existing databases get the wider type check here.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS to_account_id UUID REFERENCES accounts(id) ON DELETE CASCADE;
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_type_check;
+ALTER TABLE transactions ADD CONSTRAINT transactions_type_check CHECK (type IN ('EXPENSE', 'INCOME', 'TRANSFER'));
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_transfer_check;
+ALTER TABLE transactions ADD CONSTRAINT transactions_transfer_check
+  CHECK ((type = 'TRANSFER') = (to_account_id IS NOT NULL) AND to_account_id IS DISTINCT FROM account_id);
+ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS to_account_id UUID REFERENCES accounts(id) ON DELETE CASCADE;
+ALTER TABLE recurring_rules DROP CONSTRAINT IF EXISTS recurring_rules_type_check;
+ALTER TABLE recurring_rules ADD CONSTRAINT recurring_rules_type_check CHECK (type IN ('EXPENSE', 'INCOME', 'TRANSFER'));
+ALTER TABLE recurring_rules DROP CONSTRAINT IF EXISTS recurring_rules_transfer_check;
+ALTER TABLE recurring_rules ADD CONSTRAINT recurring_rules_transfer_check
+  CHECK ((type = 'TRANSFER') = (to_account_id IS NOT NULL) AND to_account_id IS DISTINCT FROM account_id);
+
 CREATE TABLE IF NOT EXISTS recurring_skips (
   rule_id UUID NOT NULL REFERENCES recurring_rules(id) ON DELETE CASCADE,
   period TEXT NOT NULL,
@@ -193,6 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(user_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_to_account ON transactions(to_account_id);
 CREATE INDEX IF NOT EXISTS idx_recurring_user ON recurring_rules(user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_rule ON transactions(recurring_rule_id);
 `;

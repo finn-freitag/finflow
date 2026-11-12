@@ -31,6 +31,7 @@ export async function GET() {
         `SELECT
            id,
            account_id AS "accountId",
+           to_account_id AS "toAccountId",
            category_id AS "categoryId",
            type,
            amount::float8 AS amount,
@@ -52,6 +53,7 @@ export async function GET() {
         `SELECT
            id,
            account_id AS "accountId",
+           to_account_id AS "toAccountId",
            category_id AS "categoryId",
            type,
            amount::float8 AS amount,

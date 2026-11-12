@@ -23,8 +23,10 @@ export interface CategoryItem {
 export interface TransactionItem {
   id: string;
   accountId: string;
+  /** Destination account of a transfer (money moves from accountId to toAccountId). */
+  toAccountId?: string | null;
   categoryId: string | null;
-  type: "EXPENSE" | "INCOME";
+  type: "EXPENSE" | "INCOME" | "TRANSFER";
   amount: number;
   description: string;
   notes: string;
@@ -39,8 +41,10 @@ export interface TransactionItem {
 export interface RecurringRuleItem {
   id: string;
   accountId: string;
+  /** Destination account of a recurring transfer. */
+  toAccountId?: string | null;
   categoryId: string | null;
-  type: "EXPENSE" | "INCOME";
+  type: "EXPENSE" | "INCOME" | "TRANSFER";
   amount: number;
   description: string;
   frequency: "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY";
@@ -81,6 +85,61 @@ export interface CategoryTreeNode {
   allTimeNet: number;
   allTimeExpense: number;
   allTimeIncome: number;
+}
+
+/**
+ * Whether a transaction belongs to an account: its own account, or either side of a transfer.
+ * `accountFilterId` "ALL" matches everything.
+ */
+export function transactionTouchesAccount(tx: TransactionItem, accountFilterId: string | "ALL"): boolean {
+  return accountFilterId === "ALL" || tx.accountId === accountFilterId || tx.toAccountId === accountFilterId;
+}
+
+/**
+ * Change of an account's balance caused by a transaction: income adds, expenses subtract, and a
+ * transfer subtracts from its source account and adds to its destination account.
+ */
+export function balanceEffect(tx: TransactionItem, accountId: string): number {
+  if (tx.type === "TRANSFER") {
+    if (tx.accountId === accountId) return -tx.amount;
+    if (tx.toAccountId === accountId) return tx.amount;
+    return 0;
+  }
+  if (tx.accountId !== accountId) return 0;
+  return tx.type === "INCOME" ? tx.amount : -tx.amount;
+}
+
+/**
+ * How a transaction counts as income or expense in the current view, or null if it doesn't.
+ *
+ * Income and expenses count for their own account. A transfer only moves money between the
+ * user's accounts, so with all accounts in view it counts as neither (otherwise both the income
+ * and the expense side would grow although no money came in or went out). With a single account
+ * in view it is real money for that account: an expense when it leaves, income when it arrives.
+ * It has no private/business split, so it belongs entirely to that account's scope.
+ */
+export function viewedAmounts(
+  tx: TransactionItem,
+  scopeFilter: ScopeFilter,
+  accountFilterId: string | "ALL",
+  accountScopes: Map<string, AccountItem["scope"]>
+): { kind: "EXPENSE" | "INCOME"; effectiveAmount: number; privateAmount: number; businessAmount: number } | null {
+  if (tx.type === "TRANSFER") {
+    if (accountFilterId === "ALL") return null;
+    const kind =
+      tx.accountId === accountFilterId ? "EXPENSE" : tx.toAccountId === accountFilterId ? "INCOME" : null;
+    if (!kind) return null;
+    const isBusiness = accountScopes.get(accountFilterId) === "BUSINESS";
+    const privateAmount = isBusiness ? 0 : tx.amount;
+    const businessAmount = isBusiness ? tx.amount : 0;
+    const effectiveAmount =
+      scopeFilter === "PRIVATE" ? privateAmount : scopeFilter === "BUSINESS" ? businessAmount : tx.amount;
+    return effectiveAmount > 0 ? { kind, effectiveAmount, privateAmount, businessAmount } : null;
+  }
+
+  if (accountFilterId !== "ALL" && tx.accountId !== accountFilterId) return null;
+  const amounts = getEffectiveTransactionAmount(tx, scopeFilter);
+  return amounts.effectiveAmount > 0 ? { kind: tx.type, ...amounts } : null;
 }
 
 export function getEffectiveTransactionAmount(
@@ -126,6 +185,8 @@ export function buildCategoryTreeWithSums(
     selectedYear: number;
     selectedMonth: number;
     accountFilterId: string | "ALL";
+    /** Needed to give a transfer the scope of the viewed account (single-account view). */
+    accounts?: AccountItem[];
   }
 ): {
   rootNode: CategoryTreeNode;
@@ -133,6 +194,7 @@ export function buildCategoryTreeWithSums(
   flatNodes: CategoryTreeNode[];
 } {
   const { scopeFilter, periodMode, selectedYear, selectedMonth, accountFilterId } = options;
+  const accountScopes = new Map((options.accounts ?? []).map((a) => [a.id, a.scope]));
 
   const nodeMap = new Map<string | null, CategoryTreeNode>();
 
@@ -215,21 +277,26 @@ export function buildCategoryTreeWithSums(
 
   // Accumulate direct transactions onto each node
   for (const tx of transactions) {
-    if (accountFilterId !== "ALL" && tx.accountId !== accountFilterId) {
-      continue;
-    }
-
-    const { effectiveAmount, privateAmount, businessAmount } = getEffectiveTransactionAmount(
-      tx,
-      scopeFilter
-    );
-    if (effectiveAmount <= 0) continue;
-
     const targetNode =
       tx.categoryId && nodeMap.has(tx.categoryId) ? nodeMap.get(tx.categoryId)! : rootNode;
 
+    const viewed = viewedAmounts(tx, scopeFilter, accountFilterId, accountScopes);
+    if (!viewed) {
+      // A transfer with all accounts in view adds nothing to the sums, but is still listed
+      // (and counted) in its folder.
+      if (
+        tx.type === "TRANSFER" &&
+        transactionTouchesAccount(tx, accountFilterId) &&
+        matchesPeriod(tx.date, periodMode, selectedYear, selectedMonth)
+      ) {
+        targetNode.directTransactionCount += 1;
+      }
+      continue;
+    }
+    const { kind, effectiveAmount, privateAmount, businessAmount } = viewed;
+
     // 1. All-time direct accumulation ( transferred to recursive in post-order step )
-    if (tx.type === "EXPENSE") {
+    if (kind === "EXPENSE") {
       targetNode.allTimeExpense += effectiveAmount;
       targetNode.allTimeNet -= effectiveAmount;
     } else {
@@ -240,7 +307,7 @@ export function buildCategoryTreeWithSums(
     // 2. Period-filtered direct accumulation
     if (matchesPeriod(tx.date, periodMode, selectedYear, selectedMonth)) {
       targetNode.directTransactionCount += 1;
-      if (tx.type === "EXPENSE") {
+      if (kind === "EXPENSE") {
         targetNode.directExpense += effectiveAmount;
         targetNode.directNet -= effectiveAmount;
         targetNode.privateExpense += privateAmount;
@@ -417,22 +484,21 @@ function accumulateSeries(
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
   accountFilterId: string | "ALL",
+  accountScopes: Map<string, AccountItem["scope"]>,
   pick: (date: string) => MonthlyChartPoint | null
 ) {
   for (const tx of transactions) {
-    if (accountFilterId !== "ALL" && tx.accountId !== accountFilterId) continue;
     if (!includeAllCategories && !allowedCategoryIds.has(tx.categoryId)) continue;
+
+    // Transfers count only with a single account in view (see viewedAmounts).
+    const viewed = viewedAmounts(tx, scopeFilter, accountFilterId, accountScopes);
+    if (!viewed) continue;
 
     const pt = pick(tx.date);
     if (!pt) continue;
 
-    const { effectiveAmount, privateAmount, businessAmount } = getEffectiveTransactionAmount(
-      tx,
-      scopeFilter
-    );
-    if (effectiveAmount <= 0) continue;
-
-    if (tx.type === "EXPENSE") {
+    const { kind, effectiveAmount, privateAmount, businessAmount } = viewed;
+    if (kind === "EXPENSE") {
       pt.expense = Math.round((pt.expense + effectiveAmount) * 100) / 100;
       pt.privateExpense = Math.round((pt.privateExpense + privateAmount) * 100) / 100;
       pt.businessExpense = Math.round((pt.businessExpense + businessAmount) * 100) / 100;
@@ -450,7 +516,8 @@ export function getYearlyMonthlySeries(
   allowedCategoryIds: Set<string | null>,
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL"
+  accountFilterId: string | "ALL",
+  accounts: AccountItem[] = []
 ): MonthlyChartPoint[] {
   const points = MONTH_LABELS.map((label, idx) => emptyPoint(idx + 1, label));
   accumulateSeries(
@@ -459,6 +526,7 @@ export function getYearlyMonthlySeries(
     includeAllCategories,
     scopeFilter,
     accountFilterId,
+    new Map(accounts.map((a) => [a.id, a.scope])),
     (date) => {
       if (Number(date.slice(0, 4)) !== year) return null;
       return points[Number(date.slice(5, 7)) - 1] ?? null;
@@ -481,7 +549,8 @@ export function getMultiYearSeries(
   allowedCategoryIds: Set<string | null>,
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL"
+  accountFilterId: string | "ALL",
+  accounts: AccountItem[] = []
 ): YearlyChartPoint[] {
   let first = currentYear;
   let last = currentYear;
@@ -502,6 +571,7 @@ export function getMultiYearSeries(
     includeAllCategories,
     scopeFilter,
     accountFilterId,
+    new Map(accounts.map((a) => [a.id, a.scope])),
     (date) => points[Number(date.slice(0, 4)) - first] ?? null
   );
   return points;

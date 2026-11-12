@@ -7,6 +7,7 @@ import { accountScopeForUser, isOwnCategoryOrRoot, isUuid, parseAmount } from "@
 const RETURNING = `
   id,
   account_id AS "accountId",
+  to_account_id AS "toAccountId",
   category_id AS "categoryId",
   type,
   amount::float8 AS amount,
@@ -21,8 +22,10 @@ const RETURNING = `
 
 interface TxInput {
   accountId: string;
+  /** Destination account; set only for transfers. */
+  toAccountId: string | null;
   categoryId: string | null;
-  type: "EXPENSE" | "INCOME";
+  type: "EXPENSE" | "INCOME" | "TRANSFER";
   amount: number;
   description: string;
   notes: string;
@@ -37,7 +40,8 @@ type ParseResult = { ok: true; input: TxInput } | { ok: false; status: number; e
 async function parseTxInput(body: Record<string, unknown>, userId: string): Promise<ParseResult> {
   const accountId = String(body.accountId || "");
   const categoryId = body.categoryId ? String(body.categoryId) : null;
-  const type = body.type === "INCOME" ? "INCOME" : "EXPENSE";
+  const type = body.type === "INCOME" ? "INCOME" : body.type === "TRANSFER" ? "TRANSFER" : "EXPENSE";
+  const toAccountId = type === "TRANSFER" ? String(body.toAccountId || "") : null;
   const amount = Math.abs(parseAmount(body.amount));
   const description = String(body.description || "").trim();
   const notes = String(body.notes || "").trim();
@@ -53,6 +57,24 @@ async function parseTxInput(body: Record<string, unknown>, userId: string): Prom
   if (!accountScope) return { ok: false, status: 404, error: "Account not found." };
   if (!(await isOwnCategoryOrRoot(categoryId, userId))) {
     return { ok: false, status: 404, error: "Category folder not found." };
+  }
+
+  if (type === "TRANSFER") {
+    if (!toAccountId) return { ok: false, status: 400, error: "Choose the account the money goes to." };
+    if (toAccountId === accountId) {
+      return { ok: false, status: 400, error: "A transfer needs two different accounts." };
+    }
+    if (!(await accountScopeForUser(toAccountId, userId))) {
+      return { ok: false, status: 404, error: "Destination account not found." };
+    }
+    // A transfer is neither income nor expense, so it has no private/business split.
+    return {
+      ok: true,
+      input: {
+        accountId, toAccountId, categoryId, type, amount, description, notes, date,
+        isSplit: false, businessSharePct: 0, businessAmount: 0,
+      },
+    };
   }
 
   let businessSharePct = accountScope === "BUSINESS" ? 100 : 0;
@@ -72,7 +94,7 @@ async function parseTxInput(body: Record<string, unknown>, userId: string): Prom
 
   return {
     ok: true,
-    input: { accountId, categoryId, type, amount, description, notes, date, isSplit, businessSharePct, businessAmount },
+    input: { accountId, toAccountId, categoryId, type, amount, description, notes, date, isSplit, businessSharePct, businessAmount },
   };
 }
 
@@ -87,8 +109,8 @@ export async function POST(req: NextRequest) {
 
     const res = await query(
       `INSERT INTO transactions
-        (user_id, account_id, category_id, type, amount, description, notes, date, is_split, business_share_pct, business_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        (user_id, account_id, category_id, type, amount, description, notes, date, is_split, business_share_pct, business_amount, to_account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING ${RETURNING}`,
       [
         user.id,
@@ -102,6 +124,7 @@ export async function POST(req: NextRequest) {
         t.isSplit,
         t.businessSharePct,
         t.businessAmount,
+        t.toAccountId,
       ]
     );
 
@@ -138,6 +161,7 @@ export async function PUT(req: NextRequest) {
            is_split = $8,
            business_share_pct = $9,
            business_amount = $10,
+           to_account_id = $13,
            recurring_modified = (recurring_rule_id IS NOT NULL)
        WHERE id = $11 AND user_id = $12
        RETURNING ${RETURNING}`,
@@ -154,6 +178,7 @@ export async function PUT(req: NextRequest) {
         t.businessAmount,
         id,
         user.id,
+        t.toAccountId,
       ]
     );
     if (res.rows.length === 0) {

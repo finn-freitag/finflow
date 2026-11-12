@@ -45,6 +45,7 @@ import {
 } from "@/lib/tree-utils";
 import { CategoryTree } from "./CategoryTree";
 import { SpendingCharts } from "./SpendingCharts";
+import { AccountDistributionChart } from "./AccountDistributionChart";
 import { LightDismissDialog } from "./LightDismissDialog";
 import { AuthOnboardingView, PublicSystemState } from "./AuthOnboardingView";
 
@@ -1541,6 +1542,18 @@ export function FinFlowApp() {
                   New Account
                 </button>
               </div>
+
+              {accounts.length > 0 && (
+                <AccountDistributionChart
+                  accounts={accounts}
+                  balances={accountBalances}
+                  currency={currency}
+                  onSelectAccount={(id) => {
+                    setAccountFilterId(id);
+                    setActiveTab("transactions");
+                  }}
+                />
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {accounts.map((acc) => {

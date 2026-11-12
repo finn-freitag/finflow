@@ -202,6 +202,15 @@ CREATE TABLE IF NOT EXISTS recurring_skips (
   PRIMARY KEY (rule_id, period)
 );
 
+-- Free-text note per user and app tab (see src/lib/notes.ts).
+CREATE TABLE IF NOT EXISTS notes (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tab TEXT NOT NULL CHECK (tab IN ('dashboard', 'transactions', 'accounts', 'recurring')),
+  content TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, tab)
+);
+
 CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_categories_user ON categories(user_id);
 CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { processDueRecurringRules } from "@/lib/recurring";
+import { notesFromRows } from "@/lib/notes";
 
 export async function GET() {
   try {
@@ -12,7 +13,7 @@ export async function GET() {
 
     const generatedRecurringCount = await processDueRecurringRules(user.id);
 
-    const [accountsRes, categoriesRes, transactionsRes, recurringRes] = await Promise.all([
+    const [accountsRes, categoriesRes, transactionsRes, recurringRes, notesRes] = await Promise.all([
       query(
         `SELECT id, name, type, scope, initial_balance::float8 AS "initialBalance", color, icon, created_at AS "createdAt"
          FROM accounts
@@ -72,6 +73,7 @@ export async function GET() {
          ORDER BY next_run_date ASC`,
         [user.id]
       ),
+      query<{ tab: string; content: string }>(`SELECT tab, content FROM notes WHERE user_id = $1`, [user.id]),
     ]);
 
     return NextResponse.json({
@@ -81,6 +83,7 @@ export async function GET() {
       categories: categoriesRes.rows,
       transactions: transactionsRes.rows,
       recurringRules: recurringRes.rows,
+      notes: notesFromRows(notesRes.rows),
     });
   } catch (err) {
     console.error("Error in /api/finance:", err);

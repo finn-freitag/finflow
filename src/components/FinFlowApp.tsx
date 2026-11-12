@@ -49,6 +49,8 @@ import {
 import { CategoryTree } from "./CategoryTree";
 import { SpendingCharts } from "./SpendingCharts";
 import { AccountDistributionChart } from "./AccountDistributionChart";
+import { TabNoteButton, TabNotePanel, useTabNotes } from "./TabNote";
+import { NoteTab, isNoteTab } from "@/lib/notes";
 import { LightDismissDialog } from "./LightDismissDialog";
 import { AuthOnboardingView, PublicSystemState } from "./AuthOnboardingView";
 
@@ -103,6 +105,13 @@ async function alertRequestError(res: Response) {
   window.alert(data.error || `Saving failed (HTTP ${res.status}).`);
 }
 
+const NOTE_TAB_LABELS: Record<NoteTab, string> = {
+  dashboard: "Tree & Charts",
+  transactions: "Transactions",
+  accounts: "Bank Accounts",
+  recurring: "Recurring Rules",
+};
+
 export function FinFlowApp() {
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
@@ -122,6 +131,8 @@ export function FinFlowApp() {
   const [loadingData, setLoadingData] = useState(false);
 
   // Navigation & Filters
+  const tabNotes = useTabNotes();
+  const { loadNotes } = tabNotes;
   const [activeTab, setActiveTab] = useState<
     "dashboard" | "transactions" | "accounts" | "recurring" | "admin"
   >("dashboard");
@@ -238,6 +249,7 @@ export function FinFlowApp() {
         setCategories(data.categories || []);
         setTransactions(data.transactions || []);
         setRecurringRules(data.recurringRules || []);
+        loadNotes(data.notes);
         const firstAccountId: string | undefined = data.accounts?.[0]?.id;
         if (firstAccountId) {
           setTxAccountId((prev) => prev || firstAccountId);
@@ -247,7 +259,7 @@ export function FinFlowApp() {
     } finally {
       setLoadingData(false);
     }
-  }, []);
+  }, [loadNotes]);
 
   const checkAuthAndLoad = useCallback(async () => {
     try {
@@ -1126,7 +1138,7 @@ export function FinFlowApp() {
               <div className="lg:hidden w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center text-white">
                 <Layers className="w-4 h-4" />
               </div>
-              <div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <h1 className="fluid-heading font-bold text-white">
                   {activeTab === "dashboard" && "Category Tree & Analytics"}
                   {activeTab === "transactions" && "Transactions Explorer"}
@@ -1134,6 +1146,7 @@ export function FinFlowApp() {
                   {activeTab === "recurring" && "Recurring Transactions"}
                   {activeTab === "admin" && "System Administration & Auth"}
                 </h1>
+                {isNoteTab(activeTab) && <TabNoteButton state={tabNotes} tab={activeTab} />}
               </div>
             </div>
 
@@ -1410,6 +1423,11 @@ export function FinFlowApp() {
               </div>
             </div>
           </section>
+
+          {/* Free-text note of the current tab (hidden while empty unless opened) */}
+          {isNoteTab(activeTab) && (
+            <TabNotePanel state={tabNotes} tab={activeTab} label={NOTE_TAB_LABELS[activeTab]} />
+          )}
 
           {/* TAB 1: DASHBOARD (Category Tree + Charts + Folder Transactions) */}
           {activeTab === "dashboard" && (

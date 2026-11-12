@@ -1,9 +1,11 @@
 import { randomUUID } from "crypto";
 import { query, QueryFn, withTransaction } from "./db";
 import { FREQUENCIES, Frequency, isValidYMD } from "./recurring-schedule";
+import { MAX_NOTE_LENGTH, NOTE_TABS, NoteTab, isNoteTab } from "./notes";
 
 /**
- * JSON backup of one user's workspace (accounts, folders, transactions, recurring rules).
+ * JSON backup of one user's workspace (accounts, folders, transactions, recurring rules, tab
+ * notes).
  * Importing replaces the user's whole workspace inside a single database transaction; any
  * validation error aborts before anything is changed. All IDs are remapped on import, so a
  * backup can be restored into any account or instance.
@@ -11,7 +13,7 @@ import { FREQUENCIES, Frequency, isValidYMD } from "./recurring-schedule";
 
 export const BACKUP_FORMAT = "finflow-backup";
 // Version 2 added transfers (type "TRANSFER" with toAccountId) for transactions and recurring
-// rules; version 1 files still import.
+// rules; version 1 files still import. Tab notes are an optional field (older files have none).
 export const BACKUP_VERSION = 2;
 
 const ACCOUNT_TYPES = ["CHECKING", "SAVINGS", "CREDIT_CARD", "CASH", "INVESTMENT"] as const;
@@ -85,6 +87,11 @@ export interface BackupTransaction {
   createdAt: string;
 }
 
+export interface BackupNote {
+  tab: NoteTab;
+  content: string;
+}
+
 export interface BackupFile {
   format: typeof BACKUP_FORMAT;
   version: number;
@@ -95,6 +102,7 @@ export interface BackupFile {
   recurringRules: BackupRecurringRule[];
   recurringSkips: BackupRecurringSkip[];
   transactions: BackupTransaction[];
+  notes: BackupNote[];
 }
 
 export interface ImportSummary {
@@ -109,7 +117,7 @@ export interface ImportSummary {
 // ---------------------------------------------------------------------------------------------
 
 export async function exportUserData(userId: string): Promise<BackupFile> {
-  const [userRes, accounts, categories, rules, skips, transactions] = await Promise.all([
+  const [userRes, accounts, categories, rules, skips, transactions, notes] = await Promise.all([
     query<{ currency: string }>(`SELECT currency FROM users WHERE id = $1`, [userId]),
     query<BackupAccount>(
       `SELECT id, name, type, scope, initial_balance::float8 AS "initialBalance", color, icon,
@@ -153,6 +161,7 @@ export async function exportUserData(userId: string): Promise<BackupFile> {
        FROM transactions WHERE user_id = $1 ORDER BY date, created_at, id`,
       [userId]
     ),
+    query<BackupNote>(`SELECT tab, content FROM notes WHERE user_id = $1 ORDER BY tab`, [userId]),
   ]);
 
   const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v));
@@ -167,6 +176,7 @@ export async function exportUserData(userId: string): Promise<BackupFile> {
     recurringRules: rules.rows.map((r) => ({ ...r, createdAt: toIso(r.createdAt) })),
     recurringSkips: skips.rows,
     transactions: transactions.rows.map((t) => ({ ...t, createdAt: toIso(t.createdAt) })),
+    notes: notes.rows,
   };
 }
 
@@ -470,6 +480,18 @@ export function validateBackup(raw: unknown): BackupFile {
     };
   });
 
+  // Tab notes (optional). Kept verbatim, including whitespace; the last entry per tab wins.
+  const noteByTab = new Map<NoteTab, string>();
+  asArray(root.notes, "backup.notes").forEach((raw, i) => {
+    const p = `backup.notes[${i}]`;
+    const o = asObject(raw, p);
+    if (!isNoteTab(o.tab)) fail(`${p}.tab`, `must be one of ${NOTE_TABS.join(", ")}`);
+    if (typeof o.content !== "string") fail(`${p}.content`, "must be a string");
+    if (o.content.length > MAX_NOTE_LENGTH) fail(`${p}.content`, `is too long (max ${MAX_NOTE_LENGTH})`);
+    if (o.content.trim()) noteByTab.set(o.tab, o.content);
+  });
+  const notes = [...noteByTab].map(([tab, content]) => ({ tab, content }));
+
   return {
     format: BACKUP_FORMAT,
     version,
@@ -480,6 +502,7 @@ export function validateBackup(raw: unknown): BackupFile {
     recurringRules,
     recurringSkips,
     transactions,
+    notes,
   };
 }
 
@@ -517,6 +540,7 @@ export async function importUserData(userId: string, data: BackupFile): Promise<
     await q(`DELETE FROM recurring_rules WHERE user_id = $1`, [userId]);
     await q(`DELETE FROM categories WHERE user_id = $1`, [userId]);
     await q(`DELETE FROM accounts WHERE user_id = $1`, [userId]);
+    await q(`DELETE FROM notes WHERE user_id = $1`, [userId]);
 
     await insertMany(
       q,
@@ -579,6 +603,13 @@ export async function importUserData(userId: string, data: BackupFile): Promise<
         t.recurringRuleId ? ruleMap.get(t.recurringRuleId) : null, t.recurringPeriod,
         t.recurringModified, ts(t.createdAt), t.toAccountId ? accountMap.get(t.toAccountId) : null,
       ])
+    );
+
+    await insertMany(
+      q,
+      "notes",
+      ["user_id", "tab", "content"],
+      data.notes.map((n) => [userId, n.tab, n.content])
     );
 
     await q(`UPDATE users SET currency = $1 WHERE id = $2`, [data.user.currency, userId]);

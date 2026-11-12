@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { ArrowUpLeft, BarChart3, PieChart as PieChartIcon } from "lucide-react";
+import { ArrowUpLeft, BarChart3, ChevronRight, PieChart as PieChartIcon } from "lucide-react";
 import {
   CategoryTreeNode,
   FolderBreakdownSlice,
@@ -9,6 +9,7 @@ import {
   formatCurrency,
   getFolderSpendingBreakdown,
 } from "@/lib/tree-utils";
+import { TruncatedText } from "./TruncatedText";
 
 interface SpendingChartsProps {
   activeNode: CategoryTreeNode;
@@ -19,6 +20,8 @@ interface SpendingChartsProps {
   periodLabel: string;
   currency: string;
   onSelectMonth?: (month: number) => void;
+  /** Charts area spans the full width (tree in wide view): show both charts side by side. */
+  wide?: boolean;
 }
 
 export function SpendingCharts({
@@ -30,6 +33,7 @@ export function SpendingCharts({
   periodLabel,
   currency,
   onSelectMonth,
+  wide = false,
 }: SpendingChartsProps) {
   const [breakdownMode, setBreakdownMode] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [barChartMode, setBarChartMode] = useState<"EXPENSE_INCOME" | "PRIVATE_BUSINESS">(
@@ -55,7 +59,7 @@ export function SpendingCharts({
   );
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+    <div className={`grid grid-cols-1 gap-4 ${wide ? "xl:grid-cols-2" : ""}`}>
       {/* Chart 1: Spending / Income per Folder (Donut + Drilldown Bars) */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg flex flex-col justify-between">
         <div>
@@ -120,9 +124,10 @@ export function SpendingCharts({
               {periodLabel}.
             </div>
           ) : (
-            <div className="mt-4 grid grid-cols-1 sm:grid-cols-12 gap-4 items-center">
-              {/* SVG Donut Chart */}
-              <div className="sm:col-span-5 flex flex-col items-center justify-center">
+            <div className="mt-4 flex flex-col sm:flex-row xl:flex-col 2xl:flex-row gap-4 sm:items-center xl:items-stretch 2xl:items-center">
+              {/* Donut beside the list, except at xl where the card is only ~half the content width.
+                  The donut has a fixed size; the folder list takes the remaining width. */}
+              <div className="shrink-0 flex flex-col items-center justify-center">
                 <div className="relative w-44 h-44 flex items-center justify-center">
                   <svg className="w-44 h-44 -rotate-90" viewBox="0 0 160 160">
                     <circle
@@ -143,6 +148,7 @@ export function SpendingCharts({
                       return (
                         <circle
                           key={`${slice.id ?? "direct"}-${i}`}
+                          aria-label={`${slice.name}: ${formatCurrency(val, currency)} (${slice.percentage.toFixed(1)}%)`}
                           cx="80"
                           cy="80"
                           r={radius}
@@ -159,7 +165,11 @@ export function SpendingCharts({
                           onClick={() => {
                             if (slice.canDrillDown) onSelectFolder(slice.id);
                           }}
-                        />
+                        >
+                          <title>
+                            {`${slice.name}: ${formatCurrency(val, currency)} (${slice.percentage.toFixed(1)}%)`}
+                          </title>
+                        </circle>
                       );
                     })}
                   </svg>
@@ -175,47 +185,56 @@ export function SpendingCharts({
               </div>
 
               {/* Folder Breakdown Bars */}
-              <div className="sm:col-span-7 space-y-2.5 max-h-60 overflow-y-auto pr-1">
+              <div className="flex-1 min-w-0 space-y-2 max-h-72 overflow-y-auto pr-1">
                 {slices.map((slice, idx) => {
                   const amount = breakdownMode === "EXPENSE" ? slice.expense : slice.income;
+                  const amountText = formatCurrency(amount, currency);
                   return (
                     <div
                       key={`${slice.id ?? "direct"}-${idx}`}
                       onClick={() => {
                         if (slice.canDrillDown) onSelectFolder(slice.id);
                       }}
-                      className={`p-2 rounded-xl border border-slate-800/80 bg-slate-950/50 transition-colors ${
+                      title={slice.canDrillDown ? `Open ${slice.name}` : undefined}
+                      className={`group p-2 rounded-xl border border-slate-800/80 bg-slate-950/50 transition-colors ${
                         slice.canDrillDown
                           ? "cursor-pointer hover:border-indigo-500/50 hover:bg-slate-800/60"
                           : ""
                       }`}
                     >
-                      <div className="flex items-center justify-between text-xs mb-1">
+                      <div className="flex items-center justify-between gap-2 text-xs">
                         <div className="flex items-center gap-2 min-w-0">
                           <span
                             className="w-2.5 h-2.5 rounded-full shrink-0"
                             style={{ backgroundColor: slice.color }}
                           />
-                          <span className="font-medium text-slate-200 truncate">{slice.name}</span>
+                          <TruncatedText
+                            text={slice.name}
+                            fullText={`${slice.name}: ${amountText} (${slice.percentage.toFixed(1)}%)`}
+                            className="font-medium text-slate-200"
+                          />
                           {slice.canDrillDown && (
-                            <span className="text-[10px] text-indigo-400 shrink-0">Drill in →</span>
+                            <ChevronRight
+                              aria-label="Drill in"
+                              className="w-3.5 h-3.5 shrink-0 text-indigo-400/70 group-hover:text-indigo-300"
+                            />
                           )}
                         </div>
-                        <div className="flex items-center gap-2 shrink-0 tabular-nums">
-                          <span className="text-slate-400">{slice.percentage.toFixed(1)}%</span>
-                          <span className="font-semibold text-white">
-                            {formatCurrency(amount, currency)}
-                          </span>
-                        </div>
+                        <span className="shrink-0 font-semibold text-white tabular-nums">{amountText}</span>
                       </div>
-                      <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                        <div
-                          className="h-full rounded-full transition-all"
-                          style={{
-                            width: `${Math.min(100, Math.max(2, slice.percentage))}%`,
-                            backgroundColor: slice.color,
-                          }}
-                        />
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(100, Math.max(2, slice.percentage))}%`,
+                              backgroundColor: slice.color,
+                            }}
+                          />
+                        </div>
+                        <span className="shrink-0 w-11 text-right text-[11px] text-slate-400 tabular-nums">
+                          {slice.percentage.toFixed(1)}%
+                        </span>
                       </div>
                     </div>
                   );

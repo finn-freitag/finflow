@@ -130,6 +130,27 @@ export function FinFlowApp() {
   const [selectedMonth, setSelectedMonth] = useState<number>(now.getMonth() + 1);
   const [accountFilterId, setAccountFilterId] = useState<string | "ALL">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
+  const [treeWide, setTreeWide] = useState(false);
+
+  // Remember the tree layout per browser (a convenience only; ignore storage errors).
+  useEffect(() => {
+    try {
+      setTreeWide(window.localStorage.getItem("finflow.treeWide") === "1");
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  const toggleTreeWide = () => {
+    setTreeWide((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("finflow.treeWide", next ? "1" : "0");
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
+  };
 
   // Transaction Modal State
   const [txModalOpen, setTxModalOpen] = useState(false);
@@ -1292,9 +1313,9 @@ export function FinFlowApp() {
 
           {/* TAB 1: DASHBOARD (Category Tree + Charts + Folder Transactions) */}
           {activeTab === "dashboard" && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Left Column: Hierarchical Category Tree */}
-              <div className="lg:col-span-5 xl:col-span-4">
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              {/* Left Column (or full width in wide view / below xl): Hierarchical Category Tree */}
+              <div className={treeWide ? "xl:col-span-12" : "xl:col-span-6 2xl:col-span-5"}>
                 <CategoryTree
                   rootNode={rootNode}
                   selectedFolderId={selectedFolderId}
@@ -1304,11 +1325,13 @@ export function FinFlowApp() {
                   onDeleteFolder={(node) => handleDeleteFolder(node)}
                   onAddTransactionInFolder={(folderId) => openNewTransactionModal(folderId)}
                   currency={currency}
+                  wide={treeWide}
+                  onToggleWide={toggleTreeWide}
                 />
               </div>
 
-              {/* Right Column: Charts + Transactions in Active Folder */}
-              <div className="lg:col-span-7 xl:col-span-8 space-y-6">
+              {/* Right Column (below the tree in wide view): Charts + Transactions in Active Folder */}
+              <div className={`space-y-6 ${treeWide ? "xl:col-span-12" : "xl:col-span-6 2xl:col-span-7"}`}>
                 <SpendingCharts
                   activeNode={activeNode}
                   onSelectFolder={(id) => setSelectedFolderId(id)}
@@ -1321,6 +1344,7 @@ export function FinFlowApp() {
                     setPeriodMode("MONTH");
                     setSelectedMonth(month);
                   }}
+                  wide={treeWide}
                 />
 
                 {/* Transactions inside the selected folder */}

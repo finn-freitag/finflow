@@ -8,11 +8,14 @@ import {
   FolderOpen,
   FolderPlus,
   Layers,
+  Maximize2,
+  Minimize2,
   Pencil,
   PlusCircle,
   Trash2,
 } from "lucide-react";
 import { CategoryTreeNode, formatCurrency } from "@/lib/tree-utils";
+import { TruncatedText } from "./TruncatedText";
 
 interface CategoryTreeProps {
   rootNode: CategoryTreeNode;
@@ -23,6 +26,8 @@ interface CategoryTreeProps {
   onDeleteFolder: (node: CategoryTreeNode) => void;
   onAddTransactionInFolder: (folderId: string | null) => void;
   currency: string;
+  wide?: boolean;
+  onToggleWide?: () => void;
 }
 
 export function CategoryTree({
@@ -34,6 +39,8 @@ export function CategoryTree({
   onDeleteFolder,
   onAddTransactionInFolder,
   currency,
+  wide = false,
+  onToggleWide,
 }: CategoryTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
@@ -67,8 +74,9 @@ export function CategoryTree({
       <div key={node.id ?? "root"} className="select-none">
         <div
           onClick={() => onSelectFolder(node.id)}
-          style={{ paddingLeft: isRoot ? "0.75rem" : `${node.depth * 1.15 + 0.5}rem` }}
-          className={`group flex items-center justify-between gap-2 py-2.5 pr-3 rounded-xl cursor-pointer transition-all border ${
+          // Nesting is indented by the subfolder wrapper below; no extra depth padding here.
+          style={{ paddingLeft: isRoot ? "0.75rem" : "0.4rem" }}
+          className={`group relative flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 py-2.5 pr-3 rounded-xl cursor-pointer transition-all border ${
             isSelected
               ? "bg-indigo-600/20 border-indigo-500/60 text-white shadow-sm"
               : "bg-transparent border-transparent hover:bg-slate-800/75 text-slate-200"
@@ -113,9 +121,12 @@ export function CategoryTree({
 
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className={`truncate text-sm ${isRoot ? "font-semibold" : "font-medium"}`}>
-                  {node.name}
-                </span>
+                <TruncatedText
+                  text={node.name}
+                  fullText={node.pathNames.join(" / ")}
+                  clampClassName="line-clamp-2 sm:line-clamp-1"
+                  className={`text-sm ${isRoot ? "font-semibold" : "font-medium"}`}
+                />
                 {node.totalTransactionCount > 0 && (
                   <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-normal shrink-0">
                     {node.totalTransactionCount}
@@ -146,7 +157,7 @@ export function CategoryTree({
             </div>
           </div>
 
-          {/* Right: Current Sum (Net) + Quick Action Buttons */}
+          {/* Right: Current Sum (Net) */}
           <div className="flex items-center gap-2 shrink-0">
             <div className="text-right">
               <div className={`text-sm font-semibold tabular-nums ${netColor}`}>
@@ -156,54 +167,56 @@ export function CategoryTree({
                 {isRoot ? "Root Sum" : hasChildren ? "Folder + Sub" : "Folder Sum"}
               </div>
             </div>
+          </div>
 
-            <div
-              className="flex items-center gap-0.5 opacity-85 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
-              onClick={(e) => e.stopPropagation()}
+          {/* Phones: actions on their own line below the selected folder (tap a folder to see them).
+              Larger screens: actions float over the sum on hover instead of reserving width. */}
+          <div
+            className={`${isSelected ? "flex" : "hidden"} basis-full justify-end items-center gap-0.5 transition-opacity sm:flex sm:basis-auto sm:absolute sm:right-2 sm:top-1/2 sm:-translate-y-1/2 sm:z-10 sm:rounded-lg sm:border sm:border-slate-700 sm:bg-slate-900/95 sm:px-1 sm:py-0.5 sm:shadow-lg sm:opacity-0 sm:pointer-events-none sm:group-hover:opacity-100 sm:group-hover:pointer-events-auto sm:focus-within:opacity-100 sm:focus-within:pointer-events-auto`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              title={`Add transaction in ${node.name}`}
+              onClick={() => onAddTransactionInFolder(node.id)}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800"
             >
-              <button
-                type="button"
-                title={`Add transaction in ${node.name}`}
-                onClick={() => onAddTransactionInFolder(node.id)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800"
-              >
-                <PlusCircle className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                title={`Add subfolder inside ${node.name}`}
-                onClick={() => onAddSubfolder(node.id)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 hover:bg-slate-800"
-              >
-                <FolderPlus className="w-3.5 h-3.5" />
-              </button>
-              {!isRoot && (
-                <>
-                  <button
-                    type="button"
-                    title={`Edit ${node.name}`}
-                    onClick={() => onEditFolder(node)}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    title={`Delete ${node.name}`}
-                    onClick={() => onDeleteFolder(node)}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </>
-              )}
-            </div>
+              <PlusCircle className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              title={`Add subfolder inside ${node.name}`}
+              onClick={() => onAddSubfolder(node.id)}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 hover:bg-slate-800"
+            >
+              <FolderPlus className="w-3.5 h-3.5" />
+            </button>
+            {!isRoot && (
+              <>
+                <button
+                  type="button"
+                  title={`Edit ${node.name}`}
+                  onClick={() => onEditFolder(node)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title={`Delete ${node.name}`}
+                  onClick={() => onDeleteFolder(node)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
           </div>
         </div>
 
         {/* Render Subfolders recursively */}
         {hasChildren && !isCollapsed && (
-          <div className="mt-0.5 space-y-0.5 border-l border-slate-800/70 ml-4">
+          <div className="mt-0.5 space-y-0.5 border-l border-slate-800/70 ml-3 pl-1 sm:ml-4 sm:pl-1.5">
             {node.children.map((child) => renderNode(child))}
           </div>
         )}
@@ -223,17 +236,31 @@ export function CategoryTree({
             Click any folder to filter charts & transactions. Sums roll up all subfolders.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => onAddSubfolder(selectedFolderId)}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 transition-colors shrink-0"
-        >
-          <FolderPlus className="w-3.5 h-3.5" />
-          New Folder
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {onToggleWide && (
+            <button
+              type="button"
+              onClick={onToggleWide}
+              title={wide ? "Show tree next to the charts" : "Show tree in full width"}
+              aria-pressed={wide}
+              className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700 transition-colors"
+            >
+              {wide ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+              {wide ? "Side by side" : "Wide view"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onAddSubfolder(selectedFolderId)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 transition-colors"
+          >
+            <FolderPlus className="w-3.5 h-3.5" />
+            New Folder
+          </button>
+        </div>
       </div>
 
-      <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">{renderNode(rootNode)}</div>
+      <div className="space-y-1 max-h-[75vh] overflow-y-auto pr-1">{renderNode(rootNode)}</div>
     </div>
   );
 }

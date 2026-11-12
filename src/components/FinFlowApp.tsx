@@ -7,6 +7,8 @@ import {
   Briefcase,
   Calendar,
   CreditCard,
+  DatabaseBackup,
+  Download,
   FolderPlus,
   Layers,
   LogOut,
@@ -19,6 +21,7 @@ import {
   Shield,
   Split,
   Trash2,
+  Upload,
   User,
   UserPlus,
   Wallet,
@@ -174,6 +177,11 @@ export function FinFlowApp() {
   const [recBusinessPct, setRecBusinessPct] = useState(50);
   const [recActive, setRecActive] = useState(true);
   const [recError, setRecError] = useState<string | null>(null);
+
+  // Backup / Restore State
+  const [backupModalOpen, setBackupModalOpen] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMsg, setBackupMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   // Admin State
   const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
@@ -754,6 +762,105 @@ export function FinFlowApp() {
     }
   };
 
+  // Backup / Restore Handlers
+  const openBackupModal = () => {
+    setBackupMsg(null);
+    setBackupModalOpen(true);
+  };
+
+  const handleExportBackup = async () => {
+    setBackupMsg(null);
+    setBackupBusy(true);
+    try {
+      const res = await fetch("/api/backup", { cache: "no-store" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setBackupMsg({ kind: "error", text: data.error || `Export failed (HTTP ${res.status}).` });
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] || `finflow-backup-${localTodayYMD()}.json`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      setBackupMsg({ kind: "ok", text: `Backup downloaded as ${filename}.` });
+    } catch {
+      setBackupMsg({ kind: "error", text: "Export failed. Please check your connection." });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleImportBackup = async (file: File) => {
+    setBackupMsg(null);
+    let text: string;
+    let parsed: {
+      format?: string;
+      exportedAt?: string;
+      accounts?: unknown[];
+      categories?: unknown[];
+      transactions?: unknown[];
+      recurringRules?: unknown[];
+    };
+    try {
+      text = await file.text();
+      parsed = JSON.parse(text);
+    } catch {
+      setBackupMsg({ kind: "error", text: "This file is not valid JSON." });
+      return;
+    }
+    if (!parsed || parsed.format !== "finflow-backup") {
+      setBackupMsg({ kind: "error", text: "This file is not a FinFlow backup." });
+      return;
+    }
+
+    const count = (v: unknown) => (Array.isArray(v) ? v.length : 0);
+    const exportedAt = parsed.exportedAt ? new Date(parsed.exportedAt).toLocaleString() : "unknown date";
+    const confirmed = window.confirm(
+      `Restore backup from ${exportedAt}?\n\n` +
+        `Backup contains: ${count(parsed.accounts)} accounts, ${count(parsed.categories)} folders, ` +
+        `${count(parsed.transactions)} transactions, ${count(parsed.recurringRules)} recurring rules.\n\n` +
+        `This REPLACES all your current data (${accounts.length} accounts, ${transactions.length} transactions, ` +
+        `${recurringRules.length} recurring rules). This cannot be undone. Export a backup of your current data first if you might need it.`
+    );
+    if (!confirmed) return;
+
+    setBackupBusy(true);
+    try {
+      const res = await fetch("/api/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: text,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBackupMsg({ kind: "error", text: data.error || `Import failed (HTTP ${res.status}).` });
+        return;
+      }
+      // All IDs changed: reset selections that point at old records, then reload everything.
+      setSelectedFolderId(null);
+      setAccountFilterId("ALL");
+      setTxAccountId("");
+      setRecAccountId("");
+      await checkAuthAndLoad();
+      const i = data.imported || {};
+      setBackupMsg({
+        kind: "ok",
+        text: `Restored ${i.accounts ?? 0} accounts, ${i.categories ?? 0} folders, ${i.transactions ?? 0} transactions and ${i.recurringRules ?? 0} recurring rules.`,
+      });
+    } catch {
+      setBackupMsg({ kind: "error", text: "Import failed. Your existing data was not changed." });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     setUser(null);
@@ -885,6 +992,14 @@ export function FinFlowApp() {
               {user.role}
             </span>
           </div>
+          <button
+            type="button"
+            onClick={openBackupModal}
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 hover:text-white transition-colors"
+          >
+            <DatabaseBackup className="w-3.5 h-3.5" />
+            Backup & Restore
+          </button>
           <button
             type="button"
             onClick={handleLogout}
@@ -1066,6 +1181,16 @@ export function FinFlowApp() {
               >
                 <Plus className="w-4 h-4" />
                 <span>Add Transaction</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={openBackupModal}
+                title="Backup & Restore"
+                aria-label="Backup & Restore"
+                className="lg:hidden p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
+              >
+                <DatabaseBackup className="w-4 h-4" />
               </button>
 
               <button
@@ -2445,6 +2570,80 @@ export function FinFlowApp() {
             </button>
           </div>
         </form>
+      </LightDismissDialog>
+
+      {/* MODAL: BACKUP & RESTORE */}
+      <LightDismissDialog
+        open={backupModalOpen}
+        onClose={() => !backupBusy && setBackupModalOpen(false)}
+        title="Backup & Restore"
+        subtitle="Export all your accounts, folders, transactions and recurring rules as a JSON file, or restore them from one."
+      >
+        <div className="space-y-4">
+          {backupMsg && (
+            <div
+              role="status"
+              className={`p-3 rounded-xl text-xs border ${
+                backupMsg.kind === "ok"
+                  ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-200"
+                  : "bg-rose-500/15 border-rose-500/40 text-rose-200"
+              }`}
+            >
+              {backupMsg.text}
+            </div>
+          )}
+
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+            <h3 className="text-sm font-semibold text-white">Export</h3>
+            <p className="text-xs text-slate-400">
+              Downloads a complete backup of your data. Keep it somewhere safe; you can restore it
+              here at any time, also on another FinFlow instance or account.
+            </p>
+            <button
+              type="button"
+              onClick={handleExportBackup}
+              disabled={backupBusy}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white"
+            >
+              <Download className="w-4 h-4" />
+              Download Backup (JSON)
+            </button>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-950 border border-rose-500/30 space-y-2">
+            <h3 className="text-sm font-semibold text-white">Restore</h3>
+            <p className="text-xs text-slate-400">
+              Replaces <strong className="text-rose-300">all</strong> of your current data with the
+              contents of a backup file. If the file is invalid, nothing is changed.
+            </p>
+            <label
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 ${
+                backupBusy ? "opacity-50 pointer-events-none" : "cursor-pointer"
+              }`}
+            >
+              <Upload className="w-4 h-4" />
+              Choose Backup File…
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="sr-only"
+                disabled={backupBusy}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) handleImportBackup(file);
+                }}
+              />
+            </label>
+          </div>
+
+          {backupBusy && (
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              Working…
+            </div>
+          )}
+        </div>
       </LightDismissDialog>
 
       {/* MODAL 5: ADMIN CREATE USER */}

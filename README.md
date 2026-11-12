@@ -22,6 +22,10 @@ A full-stack **Next.js + PostgreSQL** finance tracking application designed for 
    - On first launch, either use the interactive **Web Onboarding Wizard** to create the Admin user, or pre-seed the Admin user via `ADMIN_EMAIL` and `ADMIN_PASSWORD` environment variables.
    - Admin can create new users, toggle **Allow Public Self-Registration**, and choose between **Built-in Email/Password Auth**, **OpenID Connect (OIDC)**, or **Both**.
    - Each user has an isolated workspace (own accounts, category tree, and transactions).
+6. **JSON Backup & Restore**:
+   - **Backup & Restore** (sidebar, or the database icon in the mobile header) downloads your whole workspace — accounts, folders, transactions and recurring rules — as a JSON file.
+   - Restoring a backup replaces all of your current data in one database transaction; an invalid file changes nothing. Backups can be restored into any account or FinFlow instance.
+   - Backups are per user and do not include other users or the admin/auth settings.
 
 ---
 

@@ -410,6 +410,32 @@ export function FinFlowApp() {
     return map;
   }, [accounts, transactions]);
 
+  // Money currently held: initial balances plus every entry dated up to today, for the accounts
+  // matching the account filter and (by account scope) the Private/Business switch.
+  const currentBalance = useMemo(() => {
+    const today = localTodayYMD();
+    const included = accounts.filter(
+      (acc) =>
+        (accountFilterId === "ALL" || acc.id === accountFilterId) &&
+        (scopeFilter === "ALL" || acc.scope === scopeFilter)
+    );
+    const ids = new Set(included.map((acc) => acc.id));
+    let total = included.reduce((sum, acc) => sum + Number(acc.initialBalance || 0), 0);
+    for (const tx of transactions) {
+      if (!ids.has(tx.accountId) || tx.date > today) continue;
+      total += tx.type === "INCOME" ? tx.amount : -tx.amount;
+    }
+    const label =
+      accountFilterId !== "ALL"
+        ? included[0]?.name ?? "Account"
+        : scopeFilter === "ALL"
+        ? "All accounts"
+        : scopeFilter === "PRIVATE"
+        ? "Private accounts"
+        : "Business accounts";
+    return { amount: Math.round(total * 100) / 100, label, accountCount: included.length };
+  }, [accounts, transactions, accountFilterId, scopeFilter]);
+
   const currency = user?.currency || "EUR";
 
   const periodLabel = useMemo(() => {
@@ -1321,6 +1347,22 @@ export function FinFlowApp() {
               <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-400">
                 <span>Out: -{formatCurrency(rootNode.totalExpense, currency)}</span>
                 <span>In: +{formatCurrency(rootNode.totalIncome, currency)}</span>
+              </div>
+              <div
+                className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-between gap-2 text-[11px] text-slate-400"
+                title={`Initial balances plus all entries up to today (${currentBalance.label}, ${currentBalance.accountCount} account${currentBalance.accountCount === 1 ? "" : "s"})`}
+              >
+                <span className="min-w-0 leading-tight">
+                  <span className="block">Balance today</span>
+                  <span className="block truncate text-[10px] text-slate-500">{currentBalance.label}</span>
+                </span>
+                <span
+                  className={`text-sm font-semibold tabular-nums shrink-0 ${
+                    currentBalance.amount >= 0 ? "text-slate-100" : "text-rose-400"
+                  }`}
+                >
+                  {formatCurrency(currentBalance.amount, currency)}
+                </span>
               </div>
             </div>
           </section>

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { query } from "@/lib/db";
+import { query, withTransaction } from "@/lib/db";
+import { isUuid, parseAmount } from "@/lib/validate";
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,12 +14,15 @@ export async function POST(req: NextRequest) {
       ? body.type
       : "CHECKING";
     const scope = body.scope === "BUSINESS" ? "BUSINESS" : "PRIVATE";
-    const initialBalance = Number(body.initialBalance || 0);
+    const initialBalance = parseAmount(body.initialBalance ?? 0);
     const color = String(body.color || "#4f46e5");
     const icon = String(body.icon || "wallet");
 
     if (!name) {
       return NextResponse.json({ error: "Account name is required." }, { status: 400 });
+    }
+    if (!Number.isFinite(initialBalance)) {
+      return NextResponse.json({ error: "Starting balance must be a number." }, { status: 400 });
     }
 
     const res = await query(
@@ -47,31 +51,49 @@ export async function PUT(req: NextRequest) {
       ? body.type
       : "CHECKING";
     const scope = body.scope === "BUSINESS" ? "BUSINESS" : "PRIVATE";
-    const initialBalance = Number(body.initialBalance || 0);
+    const initialBalance = parseAmount(body.initialBalance ?? 0);
     const color = String(body.color || "#4f46e5");
     const icon = String(body.icon || "wallet");
 
-    if (!id || !name) {
+    if (!isUuid(id) || !name) {
       return NextResponse.json({ error: "Account ID and name are required." }, { status: 400 });
     }
+    if (!Number.isFinite(initialBalance)) {
+      return NextResponse.json({ error: "Starting balance must be a number." }, { status: 400 });
+    }
 
-    const res = await query(
-      `UPDATE accounts
-       SET name = $1, type = $2, scope = $3, initial_balance = $4, color = $5, icon = $6
-       WHERE id = $7 AND user_id = $8
-       RETURNING id, name, type, scope, initial_balance::float8 AS "initialBalance", color, icon`,
-      [name, type, scope, initialBalance, color, icon, id, user.id]
-    );
+    const res = await withTransaction(async (q) => {
+      const updated = await q(
+        `UPDATE accounts
+         SET name = $1, type = $2, scope = $3, initial_balance = $4, color = $5, icon = $6
+         WHERE id = $7 AND user_id = $8
+         RETURNING id, name, type, scope, initial_balance::float8 AS "initialBalance", color, icon`,
+        [name, type, scope, initialBalance, color, icon, id, user.id]
+      );
+      if (updated.rows.length === 0) return updated;
 
-    // For non-split transactions on this account, keep their default Private/Business scope synced
-    const defaultBizPct = scope === "BUSINESS" ? 100 : 0;
-    await query(
-      `UPDATE transactions
-       SET business_share_pct = $1,
-           business_amount = CASE WHEN $1 = 100 THEN amount ELSE 0 END
-       WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE`,
-      [defaultBizPct, id, user.id]
-    );
+      // Keep the default Private/Business share of non-split transactions and rules in sync
+      const defaultBizPct = scope === "BUSINESS" ? 100 : 0;
+      await q(
+        `UPDATE transactions
+         SET business_share_pct = $1::numeric,
+             business_amount = CASE WHEN $1::numeric = 100 THEN amount ELSE 0 END
+         WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE`,
+        [defaultBizPct, id, user.id]
+      );
+      await q(
+        `UPDATE recurring_rules
+         SET business_share_pct = $1::numeric,
+             business_amount = CASE WHEN $1::numeric = 100 THEN amount ELSE 0 END
+         WHERE account_id = $2 AND user_id = $3 AND is_split = FALSE`,
+        [defaultBizPct, id, user.id]
+      );
+      return updated;
+    });
+
+    if (res.rows.length === 0) {
+      return NextResponse.json({ error: "Account not found." }, { status: 404 });
+    }
 
     return NextResponse.json({ account: res.rows[0] });
   } catch (err) {
@@ -86,7 +108,7 @@ export async function DELETE(req: NextRequest) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const id = req.nextUrl.searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "Missing account ID" }, { status: 400 });
+    if (!isUuid(id)) return NextResponse.json({ error: "Missing or invalid account ID" }, { status: 400 });
 
     await query(`DELETE FROM accounts WHERE id = $1 AND user_id = $2`, [id, user.id]);
     return NextResponse.json({ ok: true });

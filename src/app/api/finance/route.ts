@@ -41,6 +41,7 @@ export async function GET() {
            business_share_pct::float8 AS "businessSharePct",
            business_amount::float8 AS "businessAmount",
            recurring_rule_id AS "recurringRuleId",
+           recurring_modified AS "recurringModified",
            created_at AS "createdAt"
          FROM transactions
          WHERE user_id = $1
@@ -62,7 +63,8 @@ export async function GET() {
            is_split AS "isSplit",
            business_share_pct::float8 AS "businessSharePct",
            business_amount::float8 AS "businessAmount",
-           active
+           active,
+           to_char(paused_since, 'YYYY-MM-DD') AS "pausedSince"
          FROM recurring_rules
          WHERE user_id = $1
          ORDER BY next_run_date ASC`,

@@ -28,7 +28,10 @@ services:
       - "${APP_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-finflow}:${POSTGRES_PASSWORD:-finflow_secret}@db:5432/${POSTGRES_DB:-finflow}
-      JWT_SECRET: ${JWT_SECRET:-change-this-super-secret-jwt-key-in-production-min-32-chars}
+      # Leave empty to let the app generate and store a random secret on first start.
+      JWT_SECRET: ${JWT_SECRET:-}
+      # Timezone used to decide when recurring transactions are due (e.g. Europe/Berlin).
+      TZ: ${TZ:-UTC}
       APP_URL: ${APP_URL:-http://localhost:3000}
 
       # Optional: Automatically seed initial admin user on first launch.

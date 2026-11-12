@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getSystemConfig } from "@/lib/auth";
 import { hashPassword } from "@/lib/crypto";
 import { query, seedDefaultUserWorkspace } from "@/lib/db";
+import { isUuid } from "@/lib/validate";
 
 export async function GET() {
   try {
@@ -117,7 +118,7 @@ export async function DELETE(req: NextRequest) {
     }
 
     const id = req.nextUrl.searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "Missing user ID" }, { status: 400 });
+    if (!isUuid(id)) return NextResponse.json({ error: "Missing or invalid user ID" }, { status: 400 });
     if (id === user.id) {
       return NextResponse.json(
         { error: "You cannot delete your own active admin account." },

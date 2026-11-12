@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import path from "path";
 import fs from "fs";
 import { hashPassword } from "./crypto";
+import { Frequency, occurrencesUntil, periodKey } from "./recurring-schedule";
 
 export interface QueryResult<T = Record<string, unknown>> {
   rows: T[];
@@ -22,37 +23,78 @@ function isPostgresUrl(url?: string): boolean {
   return Boolean(url && (url.startsWith("postgres://") || url.startsWith("postgresql://")));
 }
 
-async function rawQuery<T = Record<string, unknown>>(
+export type QueryFn = <T = Record<string, unknown>>(
+  text: string,
+  params?: unknown[]
+) => Promise<QueryResult<T>>;
+
+function getPool(): Pool {
+  if (!global.__finflowPool) {
+    global.__finflowPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 10,
+    });
+  }
+  return global.__finflowPool;
+}
+
+async function getPglite(): Promise<PGlite> {
+  if (!global.__finflowPglite) {
+    const dataDir = path.join(process.cwd(), "data", "pglite");
+    fs.mkdirSync(dataDir, { recursive: true });
+    global.__finflowPglite = new PGlite(dataDir);
+  }
+  await global.__finflowPglite.waitReady;
+  return global.__finflowPglite;
+}
+
+const rawQuery: QueryFn = async <T = Record<string, unknown>>(
   text: string,
   params: unknown[] = []
-): Promise<QueryResult<T>> {
-  const dbUrl = process.env.DATABASE_URL;
-
-  if (isPostgresUrl(dbUrl)) {
-    if (!global.__finflowPool) {
-      global.__finflowPool = new Pool({
-        connectionString: dbUrl,
-        max: 10,
-      });
-    }
-    const res = await global.__finflowPool.query(text, params);
+): Promise<QueryResult<T>> => {
+  if (isPostgresUrl(process.env.DATABASE_URL)) {
+    const res = await getPool().query(text, params);
     return {
       rows: res.rows as T[],
       rowCount: res.rowCount ?? res.rows.length,
     };
-  } else {
-    if (!global.__finflowPglite) {
-      const dataDir = path.join(process.cwd(), "data", "pglite");
-      fs.mkdirSync(dataDir, { recursive: true });
-      global.__finflowPglite = new PGlite(dataDir);
-      await global.__finflowPglite.waitReady;
-    }
-    const res = await global.__finflowPglite.query<T>(text, params);
-    return {
-      rows: res.rows,
-      rowCount: res.affectedRows ?? res.rows.length,
-    };
   }
+  const db = await getPglite();
+  const res = await db.query<T>(text, params);
+  return {
+    rows: res.rows,
+    rowCount: res.affectedRows ?? res.rows.length,
+  };
+};
+
+/** Runs `fn` inside a database transaction (BEGIN/COMMIT, ROLLBACK on error). */
+async function rawTransaction<T>(fn: (q: QueryFn) => Promise<T>): Promise<T> {
+  if (isPostgresUrl(process.env.DATABASE_URL)) {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const q: QueryFn = async <R = Record<string, unknown>>(text: string, params: unknown[] = []) => {
+        const res = await client.query(text, params);
+        return { rows: res.rows as R[], rowCount: res.rowCount ?? res.rows.length };
+      };
+      const result = await fn(q);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+  const db = await getPglite();
+  return db.transaction(async (tx) => {
+    const q: QueryFn = async <R = Record<string, unknown>>(text: string, params: unknown[] = []) => {
+      const res = await tx.query<R>(text, params);
+      return { rows: res.rows, rowCount: res.affectedRows ?? res.rows.length };
+    };
+    return fn(q);
+  });
 }
 
 const SCHEMA_SQL = `
@@ -134,6 +176,16 @@ CREATE TABLE IF NOT EXISTS recurring_rules (
 
 ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS start_date DATE NOT NULL DEFAULT CURRENT_DATE;
 ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS end_date DATE;
+ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS paused_since DATE;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_period TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_modified BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS recurring_skips (
+  rule_id UUID NOT NULL REFERENCES recurring_rules(id) ON DELETE CASCADE,
+  period TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (rule_id, period)
+);
 
 CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_categories_user ON categories(user_id);
@@ -142,7 +194,139 @@ CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(user_id, d
 CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_recurring_user ON recurring_rules(user_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_rule ON transactions(recurring_rule_id);
 `;
+
+// Created after the recurring migration below, which removes legacy duplicates first.
+const RULE_PERIOD_UNIQUE_INDEX_SQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_rule_period
+  ON transactions(recurring_rule_id, recurring_period)
+  WHERE recurring_rule_id IS NOT NULL AND recurring_period IS NOT NULL
+`;
+
+interface LegacyRuleRow {
+  id: string;
+  account_id: string;
+  category_id: string | null;
+  type: string;
+  amount: string;
+  description: string;
+  frequency: Frequency;
+  start_date: string;
+}
+
+interface LegacyTxRow {
+  id: string;
+  account_id: string;
+  category_id: string | null;
+  type: string;
+  amount: string;
+  description: string;
+  notes: string;
+  date: string;
+}
+
+/**
+ * One-time migration to the period-based recurring model:
+ * - every auto-generated transaction gets the period key of its rule,
+ * - duplicates created by the old engine are cleaned up (untouched copies are deleted,
+ *   hand-edited copies are kept as normal transactions),
+ * - entries that differ from what the rule would generate are flagged as hand-edited,
+ * - rules that were auto-deactivated after their end date are reactivated (an ended rule is
+ *   now derived from end_date; `active = false` only means "paused by the user").
+ */
+async function migrateRecurringV2(q: QueryFn): Promise<Record<string, number>> {
+  const stats = { linked: 0, duplicatesDeleted: 0, duplicatesDetached: 0, markedEdited: 0, danglingDetached: 0 };
+
+  const dangling = await q(
+    `UPDATE transactions SET recurring_rule_id = NULL
+     WHERE recurring_rule_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.id = transactions.recurring_rule_id)`
+  );
+  stats.danglingDetached = dangling.rowCount;
+
+  await q(
+    `UPDATE recurring_rules SET active = TRUE
+     WHERE active = FALSE AND end_date IS NOT NULL AND next_run_date > end_date`
+  );
+  await q(
+    `UPDATE recurring_rules SET paused_since = LEAST(next_run_date, CURRENT_DATE)
+     WHERE active = FALSE AND paused_since IS NULL`
+  );
+
+  const rules = await q<LegacyRuleRow>(
+    `SELECT id, account_id, category_id, type, amount::text AS amount, description, frequency,
+            to_char(start_date, 'YYYY-MM-DD') AS start_date
+     FROM recurring_rules`
+  );
+
+  for (const rule of rules.rows) {
+    const txRes = await q<LegacyTxRow>(
+      `SELECT id, account_id, category_id, type, amount::text AS amount, description, notes,
+              to_char(date, 'YYYY-MM-DD') AS date
+       FROM transactions
+       WHERE recurring_rule_id = $1 AND recurring_period IS NULL
+       ORDER BY created_at ASC`,
+      [rule.id]
+    );
+    if (txRes.rows.length === 0) continue;
+
+    const maxDate = txRes.rows.reduce((m, t) => (t.date > m ? t.date : m), rule.start_date);
+    const scheduledByPeriod = new Map<string, string>();
+    for (const d of occurrencesUntil(rule.start_date, rule.frequency, maxDate)) {
+      scheduledByPeriod.set(periodKey(d, rule.frequency), d);
+    }
+
+    // Content still exactly what the rule generates (the user never edited it).
+    const isUntouchedContent = (t: LegacyTxRow) =>
+      t.notes.startsWith("Auto-generated") &&
+      Number(t.amount) === Number(rule.amount) &&
+      t.account_id === rule.account_id &&
+      t.category_id === rule.category_id &&
+      t.type === rule.type &&
+      t.description === rule.description;
+    const isOnSchedule = (t: LegacyTxRow, key: string) => scheduledByPeriod.get(key) === t.date;
+
+    const groups = new Map<string, LegacyTxRow[]>();
+    for (const t of txRes.rows) {
+      const key = periodKey(t.date, rule.frequency);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(t);
+    }
+
+    for (const [key, rows] of groups) {
+      // Keep (1) a row with hand-edited content, else (2) the row on the scheduled date,
+      // else (3) the oldest row. Rows are already ordered oldest first; sort is stable.
+      const rank = (t: LegacyTxRow) => (!isUntouchedContent(t) ? 0 : isOnSchedule(t, key) ? 1 : 2);
+      const [keep, ...extras] = [...rows].sort((a, b) => rank(a) - rank(b));
+      const keepEdited = !isUntouchedContent(keep) || !isOnSchedule(keep, key);
+      await q(
+        `UPDATE transactions SET recurring_period = $1, recurring_modified = $2 WHERE id = $3`,
+        [key, keepEdited, keep.id]
+      );
+      stats.linked++;
+      if (keepEdited) stats.markedEdited++;
+
+      for (const extra of extras) {
+        if (isUntouchedContent(extra)) {
+          // A surplus auto-generated copy for a period that is already covered.
+          await q(`DELETE FROM transactions WHERE id = $1`, [extra.id]);
+          stats.duplicatesDeleted++;
+        } else {
+          // Hand-edited: never delete user data, keep it as a normal transaction.
+          await q(
+            `UPDATE transactions SET recurring_rule_id = NULL, recurring_period = NULL, recurring_modified = FALSE
+             WHERE id = $1`,
+            [extra.id]
+          );
+          stats.duplicatesDetached++;
+        }
+      }
+    }
+  }
+
+  return stats;
+}
 
 async function initializeDatabase(): Promise<void> {
   const statements = SCHEMA_SQL.split(";")
@@ -151,6 +335,23 @@ async function initializeDatabase(): Promise<void> {
   for (const stmt of statements) {
     await rawQuery(stmt);
   }
+
+  const migrated = await rawQuery(
+    `SELECT 1 FROM system_settings WHERE key = 'migration_recurring_v2'`
+  );
+  if (migrated.rows.length === 0) {
+    const stats = await rawTransaction(async (q) => {
+      const result = await migrateRecurringV2(q);
+      await q(
+        `INSERT INTO system_settings (key, value) VALUES ('migration_recurring_v2', $1)
+         ON CONFLICT (key) DO NOTHING`,
+        [JSON.stringify({ ...result, at: new Date().toISOString() })]
+      );
+      return result;
+    });
+    console.log("[finflow] Migrated recurring transactions to period model:", stats);
+  }
+  await rawQuery(RULE_PERIOD_UNIQUE_INDEX_SQL);
 
   // Seed default system settings if not present
   const defaultSettings: Record<string, string> = {
@@ -203,6 +404,12 @@ export async function ensureDb(): Promise<void> {
     });
   }
   await global.__finflowInitPromise;
+}
+
+/** Runs `fn` inside a database transaction. */
+export async function withTransaction<T>(fn: (q: QueryFn) => Promise<T>): Promise<T> {
+  await ensureDb();
+  return rawTransaction(fn);
 }
 
 export async function query<T = Record<string, unknown>>(
@@ -522,7 +729,14 @@ export async function seedDefaultUserWorkspace(
     },
   ];
 
-  for (const tx of sampleTransactions) {
+  // Salary, rent and cloud hosting are booked by the recurring rules seeded below.
+  const bookedByRules = new Set([
+    "Monthly Net Salary",
+    "Apartment Rent (incl. Home Office Room)",
+    "Cloud Hosting & GitHub Copilot",
+  ]);
+
+  for (const tx of sampleTransactions.filter((t) => !bookedByRules.has(t.description))) {
     await rawQuery(
       `INSERT INTO transactions
         (user_id, account_id, category_id, type, amount, description, notes, date, is_split, business_share_pct, business_amount)
@@ -544,9 +758,9 @@ export async function seedDefaultUserWorkspace(
   }
 
   // 3. Seed sample recurring rules
-  const currentMonthStart = `${year}-${month}-01`;
-  const fiveYearEndDate = `${year + 5}-${month}-01`;
-  const nextMonthDate = new Date(year, now.getMonth() + 1, 1).toISOString().slice(0, 10);
+  // Rules start last month, so the first workspace load books last and this month's entries.
+  const rulesStart = `${prevMonthYear}-${prevMonth}-01`;
+  const fiveYearEndDate = `${prevMonthYear + 5}-${prevMonth}-01`;
   await rawQuery(
     `INSERT INTO recurring_rules
       (user_id, account_id, category_id, type, amount, description, frequency, start_date, end_date, next_run_date, is_split, business_share_pct, business_amount, active)
@@ -558,12 +772,12 @@ export async function seedDefaultUserWorkspace(
       userId,
       privCheckingId,
       rentRes.rows[0].id,
-      currentMonthStart,
+      rulesStart,
       bizAccountId,
       softwareRes.rows[0].id,
       salaryRes.rows[0].id,
       fiveYearEndDate,
-      nextMonthDate,
+      rulesStart,
     ]
   );
 }

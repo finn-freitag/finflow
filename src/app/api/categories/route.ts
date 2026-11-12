@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { query } from "@/lib/db";
+import { query, withTransaction } from "@/lib/db";
+import { isOwnCategoryOrRoot, isUuid } from "@/lib/validate";
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,14 +18,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Folder name is required." }, { status: 400 });
     }
 
-    if (parentId) {
-      const parentCheck = await query(
-        `SELECT id FROM categories WHERE id = $1 AND user_id = $2`,
-        [parentId, user.id]
-      );
-      if (parentCheck.rows.length === 0) {
-        return NextResponse.json({ error: "Parent folder not found." }, { status: 404 });
-      }
+    if (!(await isOwnCategoryOrRoot(parentId, user.id))) {
+      return NextResponse.json({ error: "Parent folder not found." }, { status: 404 });
     }
 
     const res = await query(
@@ -53,8 +48,11 @@ export async function PUT(req: NextRequest) {
     const color = String(body.color || "#6366f1");
     const icon = String(body.icon || "folder");
 
-    if (!id || !name) {
+    if (!isUuid(id) || !name) {
       return NextResponse.json({ error: "Folder ID and name are required." }, { status: 400 });
+    }
+    if (!(await isOwnCategoryOrRoot(parentId, user.id))) {
+      return NextResponse.json({ error: "Parent folder not found." }, { status: 404 });
     }
     if (parentId === id) {
       return NextResponse.json({ error: "A folder cannot be its own parent." }, { status: 400 });
@@ -89,6 +87,9 @@ export async function PUT(req: NextRequest) {
       [name, parentId, color, icon, id, user.id]
     );
 
+    if (res.rows.length === 0) {
+      return NextResponse.json({ error: "Folder not found." }, { status: 404 });
+    }
     return NextResponse.json({ category: res.rows[0] });
   } catch (err) {
     console.error("Error updating category folder:", err);
@@ -102,21 +103,35 @@ export async function DELETE(req: NextRequest) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const id = req.nextUrl.searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "Missing folder ID" }, { status: 400 });
+    if (!isUuid(id)) return NextResponse.json({ error: "Missing or invalid folder ID" }, { status: 400 });
 
-    // Find parent so transactions in the deleted folder can optionally move up to parent/Root
-    const folderRes = await query<{ parent_id: string | null }>(
-      `SELECT parent_id FROM categories WHERE id = $1 AND user_id = $2`,
-      [id, user.id]
-    );
-    const parentId = folderRes.rows[0]?.parent_id || null;
+    // Subfolders, transactions and recurring rules of the deleted folder move up to its parent
+    // (or Root), so nothing is lost or silently uncategorized.
+    await withTransaction(async (q) => {
+      const folderRes = await q<{ parent_id: string | null }>(
+        `SELECT parent_id FROM categories WHERE id = $1 AND user_id = $2`,
+        [id, user.id]
+      );
+      if (folderRes.rows.length === 0) return;
+      const parentId = folderRes.rows[0].parent_id;
 
-    await query(
-      `UPDATE transactions SET category_id = $1 WHERE category_id = $2 AND user_id = $3`,
-      [parentId, id, user.id]
-    );
-
-    await query(`DELETE FROM categories WHERE id = $1 AND user_id = $2`, [id, user.id]);
+      await q(`UPDATE categories SET parent_id = $1 WHERE parent_id = $2 AND user_id = $3`, [
+        parentId,
+        id,
+        user.id,
+      ]);
+      await q(`UPDATE transactions SET category_id = $1 WHERE category_id = $2 AND user_id = $3`, [
+        parentId,
+        id,
+        user.id,
+      ]);
+      await q(`UPDATE recurring_rules SET category_id = $1 WHERE category_id = $2 AND user_id = $3`, [
+        parentId,
+        id,
+        user.id,
+      ]);
+      await q(`DELETE FROM categories WHERE id = $1 AND user_id = $2`, [id, user.id]);
+    });
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("Error deleting category folder:", err);

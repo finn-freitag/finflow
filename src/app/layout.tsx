@@ -5,8 +5,10 @@ export const metadata: Metadata = {
   title: "FinFlow — Category Tree & Private/Business Expense Tracker",
   description:
     "Hierarchical Category Tree finance tracker with recursive folder sums, interactive charts, Private & Business accounts, split transactions, and OIDC/Built-in authentication.",
+  manifest: "/manifest.json",
   icons: {
     icon: "/icon.svg",
+    apple: "/icon.svg",
   },
 };
 

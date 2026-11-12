@@ -1,13 +1,53 @@
+import { randomBytes } from "crypto";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { query } from "./db";
 
 const SESSION_COOKIE_NAME = "finflow_session";
 
-function getSecretKey(): Uint8Array {
-  const secret =
-    process.env.JWT_SECRET || "change-this-super-secret-jwt-key-in-production-min-32-chars";
-  return new TextEncoder().encode(secret);
+const PLACEHOLDER_SECRETS = new Set([
+  "change-this-super-secret-jwt-key-in-production-min-32-chars",
+]);
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __finflowJwtKey: Promise<Uint8Array> | undefined;
+}
+
+/**
+ * Uses JWT_SECRET if it is set to a real value. Otherwise (unset or the published example value)
+ * a random secret is generated once and stored in the database, so session tokens can never be
+ * forged with a publicly known key.
+ */
+async function loadSecretKey(): Promise<Uint8Array> {
+  const envSecret = process.env.JWT_SECRET?.trim();
+  if (envSecret && !PLACEHOLDER_SECRETS.has(envSecret)) {
+    if (envSecret.length < 32) {
+      console.warn("[finflow] JWT_SECRET is shorter than 32 characters; consider a longer secret.");
+    }
+    return new TextEncoder().encode(envSecret);
+  }
+  if (envSecret) {
+    console.warn("[finflow] JWT_SECRET is the example value and is ignored; using a generated secret.");
+  }
+  await query(
+    `INSERT INTO system_settings (key, value) VALUES ('jwt_secret', $1) ON CONFLICT (key) DO NOTHING`,
+    [randomBytes(48).toString("hex")]
+  );
+  const res = await query<{ value: string }>(
+    `SELECT value FROM system_settings WHERE key = 'jwt_secret'`
+  );
+  return new TextEncoder().encode(res.rows[0].value);
+}
+
+function getSecretKey(): Promise<Uint8Array> {
+  if (!global.__finflowJwtKey) {
+    global.__finflowJwtKey = loadSecretKey().catch((err) => {
+      global.__finflowJwtKey = undefined;
+      throw err;
+    });
+  }
+  return global.__finflowJwtKey;
 }
 
 export interface SessionUser {
@@ -29,7 +69,7 @@ export async function createSessionToken(user: SessionUser): Promise<string> {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("30d")
-    .sign(getSecretKey());
+    .sign(await getSecretKey());
 }
 
 export async function setSessionCookie(user: SessionUser): Promise<void> {
@@ -54,7 +94,7 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
     if (!token) return null;
 
-    const { payload } = await jwtVerify(token, getSecretKey());
+    const { payload } = await jwtVerify(token, await getSecretKey());
     if (!payload.sub) return null;
 
     const res = await query<{

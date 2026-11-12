@@ -33,6 +33,7 @@ export interface TransactionItem {
   businessSharePct: number;
   businessAmount: number;
   recurringRuleId?: string | null;
+  recurringModified?: boolean;
 }
 
 export interface RecurringRuleItem {
@@ -50,6 +51,7 @@ export interface RecurringRuleItem {
   businessSharePct: number;
   businessAmount: number;
   active: boolean;
+  pausedSince?: string | null;
 }
 
 export interface CategoryTreeNode {
@@ -283,6 +285,8 @@ export function buildCategoryTreeWithSums(
     node.totalNet = Math.round(node.totalNet * 100) / 100;
     node.privateExpense = Math.round(node.privateExpense * 100) / 100;
     node.businessExpense = Math.round(node.businessExpense * 100) / 100;
+    node.privateIncome = Math.round(node.privateIncome * 100) / 100;
+    node.businessIncome = Math.round(node.businessIncome * 100) / 100;
     node.allTimeNet = Math.round(node.allTimeNet * 100) / 100;
     node.allTimeExpense = Math.round(node.allTimeExpense * 100) / 100;
     node.allTimeIncome = Math.round(node.allTimeIncome * 100) / 100;
@@ -449,6 +453,15 @@ export function getYearlyMonthlySeries(
   }
 
   return points;
+}
+
+/** Today's date as YYYY-MM-DD in the browser's local timezone (not UTC). */
+export function localTodayYMD(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 export function formatCurrency(amount: number, currency = "EUR", showPlus = false): string {

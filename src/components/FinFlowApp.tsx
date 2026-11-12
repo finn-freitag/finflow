@@ -36,6 +36,7 @@ import {
   getDescendantCategoryIds,
   getEffectiveTransactionAmount,
   getYearlyMonthlySeries,
+  localTodayYMD,
   matchesPeriod,
 } from "@/lib/tree-utils";
 import { CategoryTree } from "./CategoryTree";
@@ -89,6 +90,11 @@ const MONTH_NAMES = [
   "December",
 ];
 
+async function alertRequestError(res: Response) {
+  const data = await res.json().catch(() => ({}));
+  window.alert(data.error || `Saving failed (HTTP ${res.status}).`);
+}
+
 export function FinFlowApp() {
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
@@ -125,11 +131,12 @@ export function FinFlowApp() {
   // Transaction Modal State
   const [txModalOpen, setTxModalOpen] = useState(false);
   const [editingTxId, setEditingTxId] = useState<string | null>(null);
+  const [editingTxRuleId, setEditingTxRuleId] = useState<string | null>(null);
   const [txType, setTxType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [txAmount, setTxAmount] = useState("");
   const [txDescription, setTxDescription] = useState("");
   const [txNotes, setTxNotes] = useState("");
-  const [txDate, setTxDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [txDate, setTxDate] = useState(() => localTodayYMD());
   const [txAccountId, setTxAccountId] = useState("");
   const [txCategoryId, setTxCategoryId] = useState<string | null>(null);
   const [txIsSplit, setTxIsSplit] = useState(false);
@@ -159,9 +166,8 @@ export function FinFlowApp() {
   const [recType, setRecType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [recAmount, setRecAmount] = useState("");
   const [recFrequency, setRecFrequency] = useState<RecurringRuleItem["frequency"]>("MONTHLY");
-  const [recStartDate, setRecStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [recStartDate, setRecStartDate] = useState(() => localTodayYMD());
   const [recEndDate, setRecEndDate] = useState("");
-  const [recNextDate, setRecNextDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [recAccountId, setRecAccountId] = useState("");
   const [recCategoryId, setRecCategoryId] = useState<string | null>(null);
   const [recIsSplit, setRecIsSplit] = useState(false);
@@ -196,15 +202,16 @@ export function FinFlowApp() {
         setCategories(data.categories || []);
         setTransactions(data.transactions || []);
         setRecurringRules(data.recurringRules || []);
-        if (data.accounts?.length > 0 && !txAccountId) {
-          setTxAccountId(data.accounts[0].id);
-          setRecAccountId(data.accounts[0].id);
+        const firstAccountId: string | undefined = data.accounts?.[0]?.id;
+        if (firstAccountId) {
+          setTxAccountId((prev) => prev || firstAccountId);
+          setRecAccountId((prev) => prev || firstAccountId);
         }
       }
     } finally {
       setLoadingData(false);
     }
-  }, [txAccountId]);
+  }, []);
 
   const checkAuthAndLoad = useCallback(async () => {
     try {
@@ -371,11 +378,12 @@ export function FinFlowApp() {
   // Modal Open Helpers
   const openNewTransactionModal = (presetFolderId: string | null = selectedFolderId) => {
     setEditingTxId(null);
+    setEditingTxRuleId(null);
     setTxType("EXPENSE");
     setTxAmount("");
     setTxDescription("");
     setTxNotes("");
-    setTxDate(new Date().toISOString().slice(0, 10));
+    setTxDate(localTodayYMD());
     setTxAccountId(accounts[0]?.id || "");
     setTxCategoryId(presetFolderId);
     setTxIsSplit(false);
@@ -386,6 +394,7 @@ export function FinFlowApp() {
 
   const openEditTransactionModal = (tx: TransactionItem) => {
     setEditingTxId(tx.id);
+    setEditingTxRuleId(tx.recurringRuleId ?? null);
     setTxType(tx.type);
     setTxAmount(String(tx.amount));
     setTxDescription(tx.description);
@@ -433,11 +442,20 @@ export function FinFlowApp() {
     if (res.ok) {
       setTxModalOpen(false);
       await loadFinanceData();
+    } else {
+      await alertRequestError(res);
     }
   };
 
-  const handleDeleteTransaction = async (id: string) => {
-    const res = await fetch(`/api/transactions?id=${encodeURIComponent(id)}`, {
+  const handleDeleteTransaction = async (tx: TransactionItem) => {
+    const rule = tx.recurringRuleId
+      ? recurringRules.find((r) => r.id === tx.recurringRuleId)
+      : undefined;
+    const message = rule
+      ? `Delete "${tx.description}" (${tx.date})?\n\nThis entry was booked by the recurring rule "${rule.description}". Deleting it skips this occurrence; it will not be booked again.`
+      : `Delete "${tx.description}" (${tx.date})?`;
+    if (!window.confirm(message)) return;
+    const res = await fetch(`/api/transactions?id=${encodeURIComponent(tx.id)}`, {
       method: "DELETE",
     });
     if (res.ok) {
@@ -479,11 +497,20 @@ export function FinFlowApp() {
     if (res.ok) {
       setFolderModalOpen(false);
       await loadFinanceData();
+    } else {
+      await alertRequestError(res);
     }
   };
 
   const handleDeleteFolder = async (node: CategoryTreeNode) => {
     if (!node.id) return;
+    const parentName = node.parentId ? nodeMap.get(node.parentId)?.name || "parent folder" : "Root";
+    if (
+      !window.confirm(
+        `Delete folder "${node.name}"?\n\nIts subfolders, transactions and recurring rules move to "${parentName}".`
+      )
+    )
+      return;
     const res = await fetch(`/api/categories?id=${encodeURIComponent(node.id)}`, {
       method: "DELETE",
     });
@@ -534,10 +561,21 @@ export function FinFlowApp() {
     if (res.ok) {
       setAccountModalOpen(false);
       await loadFinanceData();
+    } else {
+      await alertRequestError(res);
     }
   };
 
   const handleDeleteAccount = async (id: string) => {
+    const acc = accounts.find((a) => a.id === id);
+    const txCount = accountBalances.get(id)?.txCount ?? 0;
+    const ruleCount = recurringRules.filter((r) => r.accountId === id).length;
+    if (
+      !window.confirm(
+        `Delete account "${acc?.name ?? ""}"?\n\nThis permanently deletes its ${txCount} transaction(s) and ${ruleCount} recurring rule(s). This cannot be undone.`
+      )
+    )
+      return;
     const res = await fetch(`/api/accounts?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
@@ -549,7 +587,7 @@ export function FinFlowApp() {
 
   // Recurring Modal Handlers
   const openNewRecurringModal = () => {
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = localTodayYMD();
     setEditingRecurringId(null);
     setRecDescription("");
     setRecType("EXPENSE");
@@ -557,7 +595,6 @@ export function FinFlowApp() {
     setRecFrequency("MONTHLY");
     setRecStartDate(todayStr);
     setRecEndDate("");
-    setRecNextDate(todayStr);
     setRecAccountId(accounts[0]?.id || "");
     setRecCategoryId(selectedFolderId);
     setRecIsSplit(false);
@@ -575,7 +612,6 @@ export function FinFlowApp() {
     setRecFrequency(rule.frequency);
     setRecStartDate(rule.startDate || rule.nextRunDate);
     setRecEndDate(rule.endDate || "");
-    setRecNextDate(rule.nextRunDate);
     setRecAccountId(rule.accountId);
     setRecCategoryId(rule.categoryId);
     setRecIsSplit(rule.isSplit);
@@ -590,7 +626,7 @@ export function FinFlowApp() {
       setRecEndDate("");
       return;
     }
-    const baseStr = recStartDate || new Date().toISOString().slice(0, 10);
+    const baseStr = recStartDate || localTodayYMD();
     const [y, m, d] = baseStr.split("-").map(Number);
     const target = new Date(Date.UTC(y + years, m - 1, d));
     const endStr = target.toISOString().slice(0, 10);
@@ -622,7 +658,6 @@ export function FinFlowApp() {
         frequency: recFrequency,
         startDate: recStartDate,
         endDate: recEndDate ? recEndDate : null,
-        nextRunDate: editingRecurringId ? recNextDate : recStartDate,
         isSplit: recIsSplit,
         businessSharePct: recBusinessPct,
         active: recActive,
@@ -647,6 +682,13 @@ export function FinFlowApp() {
   };
 
   const handleDeleteRecurring = async (id: string) => {
+    const rule = recurringRules.find((r) => r.id === id);
+    if (
+      !window.confirm(
+        `Delete recurring rule "${rule?.description ?? ""}"?\n\nEntries it already booked are kept as normal transactions; no new ones will be booked.`
+      )
+    )
+      return;
     await fetch(`/api/recurring?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     await loadFinanceData();
   };
@@ -699,6 +741,13 @@ export function FinFlowApp() {
   };
 
   const handleDeleteUser = async (id: string) => {
+    const target = adminUsers.find((u) => u.id === id);
+    if (
+      !window.confirm(
+        `Delete user "${target?.email ?? ""}" and all of their accounts, transactions and rules? This cannot be undone.`
+      )
+    )
+      return;
     const res = await fetch(`/api/admin?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     if (res.ok) {
       await loadAdminData();
@@ -973,13 +1022,24 @@ export function FinFlowApp() {
                   onChange={(e) => setSelectedYear(Number(e.target.value))}
                   className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-200"
                 >
-                  {[now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map(
-                    (y) => (
+                  {Array.from(
+                    new Set([
+                      ...transactions
+                        .map((t) => Number(t.date.slice(0, 4)))
+                        .filter((y) => !isNaN(y) && y > 1970),
+                      now.getFullYear() - 2,
+                      now.getFullYear() - 1,
+                      now.getFullYear(),
+                      now.getFullYear() + 1,
+                      selectedYear,
+                    ])
+                  )
+                    .sort((a, b) => a - b)
+                    .map((y) => (
                       <option key={y} value={y}>
                         {y}
                       </option>
-                    )
-                  )}
+                    ))}
                 </select>
               )}
 
@@ -1420,10 +1480,16 @@ export function FinFlowApp() {
                                 Split {rule.businessSharePct}% Biz
                               </span>
                             )}
-                            {!rule.active && (
+                            {rule.endDate && rule.endDate < localTodayYMD() ? (
                               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
-                                Paused / Ended
+                                Ended
                               </span>
+                            ) : (
+                              !rule.active && (
+                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300">
+                                  Paused{rule.pausedSince ? ` since ${rule.pausedSince}` : ""}
+                                </span>
+                              )
                             )}
                           </div>
                           <div className="text-xs text-slate-400 mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1446,7 +1512,10 @@ export function FinFlowApp() {
                             <span>
                               Next Run:{" "}
                               <strong className="text-indigo-300 font-medium">
-                                {rule.nextRunDate}
+                                {!rule.active ||
+                                (rule.endDate && rule.nextRunDate > rule.endDate)
+                                  ? "—"
+                                  : rule.nextRunDate}
                               </strong>
                             </span>
                           </div>
@@ -1465,7 +1534,7 @@ export function FinFlowApp() {
                             type="checkbox"
                             checked={rule.active}
                             onChange={() => handleToggleRecurring(rule)}
-                            title="Toggle rule active"
+                            title={rule.active ? "Pause rule" : "Resume rule"}
                             className="w-4 h-4 accent-indigo-500 cursor-pointer"
                           />
                           <button
@@ -1742,6 +1811,13 @@ export function FinFlowApp() {
         subtitle="Assign to any Category Tree folder (or Root) and Private/Business account."
       >
         <form onSubmit={handleSaveTransaction} className="space-y-4">
+          {editingTxId && editingTxRuleId && (
+            <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-[11px] text-indigo-200 leading-relaxed">
+              Booked by the recurring rule &quot;
+              {recurringRules.find((r) => r.id === editingTxRuleId)?.description ?? "deleted rule"}
+              &quot;. Your changes to this entry are kept even if the rule is edited later.
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
             <button
               type="button"
@@ -2211,13 +2287,7 @@ export function FinFlowApp() {
                   type="date"
                   required
                   value={recStartDate}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setRecStartDate(val);
-                    if (!editingRecurringId) {
-                      setRecNextDate(val);
-                    }
-                  }}
+                  onChange={(e) => setRecStartDate(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-sm text-white"
                 />
               </div>
@@ -2270,31 +2340,31 @@ export function FinFlowApp() {
             </div>
 
             {editingRecurringId && (
-              <div className="pt-2 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Next Scheduled Run Date
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={recNextDate}
-                    onChange={(e) => setRecNextDate(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white"
-                  />
-                </div>
-                <label className="flex items-center gap-2 cursor-pointer sm:mt-5">
-                  <input
-                    type="checkbox"
-                    checked={recActive}
-                    onChange={(e) => setRecActive(e.target.checked)}
-                    className="w-4 h-4 accent-indigo-500"
-                  />
-                  <span className="text-xs text-slate-200">Rule is Active</span>
-                </label>
-              </div>
+              <label className="pt-3 border-t border-slate-800 flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={recActive}
+                  onChange={(e) => setRecActive(e.target.checked)}
+                  className="w-4 h-4 accent-indigo-500"
+                />
+                <span className="text-xs text-slate-200">
+                  Rule is active{" "}
+                  <span className="text-slate-500">
+                    (uncheck to pause; periods missed while paused are skipped)
+                  </span>
+                </span>
+              </label>
             )}
           </div>
+
+          {editingRecurringId && (
+            <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-[11px] text-indigo-200 leading-relaxed">
+              Saving rewrites all entries this rule has booked so far with the new settings.
+              Entries you edited by hand are kept, and deleted entries stay deleted. For a price
+              change that should only apply from now on, set an end date on this rule and create
+              a new one.
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -2470,7 +2540,7 @@ function renderResponsiveTransactionsTable(
   scopeFilter: ScopeFilter,
   currency: string,
   onEdit: (tx: TransactionItem) => void,
-  onDelete: (id: string) => void
+  onDelete: (tx: TransactionItem) => void
 ) {
   if (transactions.length === 0) {
     return (
@@ -2513,7 +2583,19 @@ function renderResponsiveTransactionsTable(
             return (
               <tr key={tx.id} className="hover:bg-slate-800/40 transition-colors">
                 <th scope="row" className="py-3 px-4 font-medium text-white">
-                  <div>{tx.description}</div>
+                  <div className="flex items-center gap-1.5">
+                    {tx.recurringRuleId && (
+                      <span title={tx.recurringModified ? "Recurring (edited by hand)" : "Recurring"}>
+                        <Repeat
+                          className={`w-3 h-3 shrink-0 ${
+                            tx.recurringModified ? "text-amber-400" : "text-indigo-400"
+                          }`}
+                          aria-label="Recurring"
+                        />
+                      </span>
+                    )}
+                    <span>{tx.description}</span>
+                  </div>
                   {tx.notes && (
                     <div className="text-[11px] text-slate-400 font-normal mt-0.5">{tx.notes}</div>
                   )}
@@ -2575,7 +2657,7 @@ function renderResponsiveTransactionsTable(
                     </button>
                     <button
                       type="button"
-                      onClick={() => onDelete(tx.id)}
+                      onClick={() => onDelete(tx)}
                       className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800"
                       title="Delete transaction"
                     >

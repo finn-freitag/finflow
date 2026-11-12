@@ -80,7 +80,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.redirect(`${appBase}/?error=oidc_missing_sub`);
     }
 
-    // Find user by oidc_sub or email
+    // Find user by oidc_sub; link an existing account by email only if the provider verified
+    // that email (otherwise anyone could claim someone else's address at the provider).
+    const emailVerified = claims.email_verified === true || claims.email_verified === "true";
     const existingRes = await query<{
       id: string;
       email: string;
@@ -88,16 +90,28 @@ export async function GET(req: NextRequest) {
       role: "ADMIN" | "USER";
       currency: string;
       oidc_sub: string | null;
-    }>(`SELECT id, email, name, role, currency, oidc_sub FROM users WHERE oidc_sub = $1 OR email = $2`, [
-      sub,
-      email,
-    ]);
+    }>(
+      `SELECT id, email, name, role, currency, oidc_sub FROM users
+       WHERE oidc_sub = $1 OR ($3::boolean AND email = $2)
+       ORDER BY (oidc_sub = $1) DESC NULLS LAST
+       LIMIT 1`,
+      [sub, email, emailVerified]
+    );
+
+    if (!existingRes.rows[0] && !emailVerified) {
+      const emailTaken = await query(`SELECT 1 FROM users WHERE email = $1`, [email]);
+      if (emailTaken.rows.length > 0) {
+        return NextResponse.redirect(`${appBase}/?error=oidc_email_not_verified`);
+      }
+    }
 
     let user = existingRes.rows[0];
 
     if (user) {
       if (!user.oidc_sub) {
         await query(`UPDATE users SET oidc_sub = $1 WHERE id = $2`, [sub, user.id]);
+      } else if (user.oidc_sub !== sub) {
+        return NextResponse.redirect(`${appBase}/?error=oidc_account_conflict`);
       }
     } else {
       if (!config.allowRegistration && !config.needsSetup) {

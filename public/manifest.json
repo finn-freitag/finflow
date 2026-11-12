@@ -1,0 +1,20 @@
+{
+  "name": "FinFlow — Category Tree & Private/Business Expense Tracker",
+  "short_name": "FinFlow",
+  "description": "Hierarchical Category Tree finance tracker with recursive folder sums, interactive charts, Private & Business accounts, split transactions, and OIDC/Built-in authentication.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "categories": ["finance", "productivity", "business"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

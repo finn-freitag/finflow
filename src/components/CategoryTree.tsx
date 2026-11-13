@@ -4,6 +4,8 @@ import React, { useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  Eye,
+  EyeOff,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -28,6 +30,10 @@ interface CategoryTreeProps {
   currency: string;
   wide?: boolean;
   onToggleWide?: () => void;
+  /** Leaves a folder (with its subfolders) out of the sums and charts, or counts it again. */
+  onToggleExcluded?: (node: CategoryTreeNode) => void;
+  excludedCount?: number;
+  onIncludeAll?: () => void;
 }
 
 export function CategoryTree({
@@ -41,6 +47,9 @@ export function CategoryTree({
   currency,
   wide = false,
   onToggleWide,
+  onToggleExcluded,
+  excludedCount = 0,
+  onIncludeAll,
 }: CategoryTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
@@ -62,6 +71,8 @@ export function CategoryTree({
     const isSelected = selectedFolderId === node.id;
     const hasChildren = node.children.length > 0;
     const isCollapsed = node.id ? collapsedIds.has(node.id) : false;
+    // Not counted in the sums of its parents and Root (shown dimmed).
+    const notCounted = node.excluded || node.insideExcluded;
 
     const netColor =
       node.totalNet > 0
@@ -83,7 +94,7 @@ export function CategoryTree({
           }`}
         >
           {/* Left: Expand toggle + Folder icon + Name + Count */}
-          <div className="flex items-center gap-2 min-w-0 flex-1">
+          <div className={`flex items-center gap-2 min-w-0 flex-1 ${notCounted ? "opacity-50" : ""}`}>
             {!isRoot ? (
               hasChildren ? (
                 <button
@@ -133,6 +144,11 @@ export function CategoryTree({
                   </span>
                 )}
               </div>
+              {isRoot && excludedCount > 0 && (
+                <div className="text-[11px] text-amber-300/90 mt-0.5">
+                  Without {excludedCount} excluded {excludedCount === 1 ? "folder" : "folders"}
+                </div>
+              )}
 
               {/* Sub-details if folder has both direct transactions and subfolder rollups, or expenses + income */}
               {(node.totalExpense > 0 || node.totalIncome > 0) && (
@@ -159,7 +175,21 @@ export function CategoryTree({
 
           {/* Right: Current Sum (Net) */}
           <div className="flex items-center gap-2 shrink-0">
-            <div className="text-right">
+            {node.excluded && onToggleExcluded && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleExcluded(node);
+                }}
+                title={`${node.name} is excluded from the sums and charts. Click to include it again.`}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25"
+              >
+                <EyeOff className="w-3 h-3" />
+                Excluded
+              </button>
+            )}
+            <div className={`text-right ${notCounted ? "opacity-50" : ""}`}>
               <div className={`text-sm font-semibold tabular-nums ${netColor}`}>
                 {formatCurrency(node.totalNet, currency, true)}
               </div>
@@ -193,6 +223,23 @@ export function CategoryTree({
             </button>
             {!isRoot && (
               <>
+                {onToggleExcluded && (
+                  <button
+                    type="button"
+                    title={
+                      node.excluded
+                        ? `Include ${node.name} in the sums and charts again`
+                        : `Exclude ${node.name} (and its subfolders) from the sums and charts`
+                    }
+                    aria-pressed={node.excluded}
+                    onClick={() => onToggleExcluded(node)}
+                    className={`p-1.5 rounded-lg hover:bg-slate-800 ${
+                      node.excluded ? "text-amber-300 hover:text-white" : "text-slate-400 hover:text-amber-300"
+                    }`}
+                  >
+                    {node.excluded ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                  </button>
+                )}
                 <button
                   type="button"
                   title={`Edit ${node.name}`}
@@ -235,6 +282,19 @@ export function CategoryTree({
           <p className="text-xs text-slate-400 mt-0.5">
             Click any folder to filter charts & transactions. Sums roll up all subfolders.
           </p>
+          {excludedCount > 0 && (
+            <p className="text-xs text-amber-300/90 mt-1 flex flex-wrap items-center gap-x-2">
+              <span className="inline-flex items-center gap-1">
+                <EyeOff className="w-3 h-3" />
+                {excludedCount} {excludedCount === 1 ? "folder is" : "folders are"} excluded from sums and charts.
+              </span>
+              {onIncludeAll && (
+                <button type="button" onClick={onIncludeAll} className="underline hover:text-white">
+                  Include all
+                </button>
+              )}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           {onToggleWide && (

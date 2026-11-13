@@ -85,14 +85,37 @@ export interface CategoryTreeNode {
   allTimeNet: number;
   allTimeExpense: number;
   allTimeIncome: number;
+  /** Excluded by the user: its totals are not added to its parent folders. */
+  excluded: boolean;
+  /** Lies inside an excluded folder. */
+  insideExcluded: boolean;
+}
+
+/** Accounts in view: "ALL", or the IDs of the selected accounts. */
+export type AccountFilter = "ALL" | readonly string[];
+
+export function isAccountInFilter(filter: AccountFilter, accountId: string | null | undefined): boolean {
+  return filter === "ALL" || (!!accountId && filter.includes(accountId));
 }
 
 /**
- * Whether a transaction belongs to an account: its own account, or either side of a transfer.
- * `accountFilterId` "ALL" matches everything.
+ * Whether a transaction belongs to the accounts in view: its own account, or either side of a
+ * transfer.
  */
-export function transactionTouchesAccount(tx: TransactionItem, accountFilterId: string | "ALL"): boolean {
-  return accountFilterId === "ALL" || tx.accountId === accountFilterId || tx.toAccountId === accountFilterId;
+export function transactionTouchesAccount(tx: TransactionItem, filter: AccountFilter): boolean {
+  return isAccountInFilter(filter, tx.accountId) || isAccountInFilter(filter, tx.toAccountId);
+}
+
+/**
+ * Direction of a transfer relative to the accounts in view: "OUT" when it leaves them, "IN" when
+ * it arrives from outside, null when both or neither side is in view (or it is no transfer).
+ */
+export function transferDirection(tx: TransactionItem, filter: AccountFilter): "OUT" | "IN" | null {
+  if (tx.type !== "TRANSFER") return null;
+  const fromIn = isAccountInFilter(filter, tx.accountId);
+  const toIn = isAccountInFilter(filter, tx.toAccountId);
+  if (fromIn === toIn) return null;
+  return fromIn ? "OUT" : "IN";
 }
 
 /**
@@ -113,23 +136,24 @@ export function balanceEffect(tx: TransactionItem, accountId: string): number {
  * How a transaction counts as income or expense in the current view, or null if it doesn't.
  *
  * Income and expenses count for their own account. A transfer only moves money between the
- * user's accounts, so with all accounts in view it counts as neither (otherwise both the income
- * and the expense side would grow although no money came in or went out). With a single account
- * in view it is real money for that account: an expense when it leaves, income when it arrives.
- * It has no private/business split, so it belongs entirely to that account's scope.
+ * user's accounts, so when both of its accounts are in view (always with "all accounts") it
+ * counts as neither (otherwise both the income and the expense side would grow although no money
+ * came in or went out). When only one side is in view it is real money for the viewed accounts:
+ * an expense when it leaves them, income when it arrives. It has no private/business split, so it
+ * belongs entirely to the scope of the account in view.
  */
 export function viewedAmounts(
   tx: TransactionItem,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL",
+  accountFilter: AccountFilter,
   accountScopes: Map<string, AccountItem["scope"]>
 ): { kind: "EXPENSE" | "INCOME"; effectiveAmount: number; privateAmount: number; businessAmount: number } | null {
   if (tx.type === "TRANSFER") {
-    if (accountFilterId === "ALL") return null;
-    const kind =
-      tx.accountId === accountFilterId ? "EXPENSE" : tx.toAccountId === accountFilterId ? "INCOME" : null;
-    if (!kind) return null;
-    const isBusiness = accountScopes.get(accountFilterId) === "BUSINESS";
+    const direction = transferDirection(tx, accountFilter);
+    if (!direction) return null;
+    const kind = direction === "OUT" ? "EXPENSE" : "INCOME";
+    const viewedAccountId = direction === "OUT" ? tx.accountId : tx.toAccountId ?? "";
+    const isBusiness = accountScopes.get(viewedAccountId) === "BUSINESS";
     const privateAmount = isBusiness ? 0 : tx.amount;
     const businessAmount = isBusiness ? tx.amount : 0;
     const effectiveAmount =
@@ -137,7 +161,7 @@ export function viewedAmounts(
     return effectiveAmount > 0 ? { kind, effectiveAmount, privateAmount, businessAmount } : null;
   }
 
-  if (accountFilterId !== "ALL" && tx.accountId !== accountFilterId) return null;
+  if (!isAccountInFilter(accountFilter, tx.accountId)) return null;
   const amounts = getEffectiveTransactionAmount(tx, scopeFilter);
   return amounts.effectiveAmount > 0 ? { kind: tx.type, ...amounts } : null;
 }
@@ -184,16 +208,19 @@ export function buildCategoryTreeWithSums(
     periodMode: PeriodMode;
     selectedYear: number;
     selectedMonth: number;
-    accountFilterId: string | "ALL";
-    /** Needed to give a transfer the scope of the viewed account (single-account view). */
+    accountFilter: AccountFilter;
+    /** Needed to give a transfer the scope of the viewed account. */
     accounts?: AccountItem[];
+    /** Folders whose totals (including their subfolders) are left out of their parents. */
+    excludedFolderIds?: ReadonlySet<string>;
   }
 ): {
   rootNode: CategoryTreeNode;
   nodeMap: Map<string | null, CategoryTreeNode>;
   flatNodes: CategoryTreeNode[];
 } {
-  const { scopeFilter, periodMode, selectedYear, selectedMonth, accountFilterId } = options;
+  const { scopeFilter, periodMode, selectedYear, selectedMonth, accountFilter } = options;
+  const excludedFolderIds = options.excludedFolderIds ?? new Set<string>();
   const accountScopes = new Map((options.accounts ?? []).map((a) => [a.id, a.scope]));
 
   const nodeMap = new Map<string | null, CategoryTreeNode>();
@@ -222,6 +249,8 @@ export function buildCategoryTreeWithSums(
     allTimeNet: 0,
     allTimeExpense: 0,
     allTimeIncome: 0,
+    excluded: false,
+    insideExcluded: false,
   };
 
   nodeMap.set(null, rootNode);
@@ -251,6 +280,8 @@ export function buildCategoryTreeWithSums(
       allTimeNet: 0,
       allTimeExpense: 0,
       allTimeIncome: 0,
+      excluded: excludedFolderIds.has(cat.id),
+      insideExcluded: false,
     });
   }
 
@@ -263,30 +294,31 @@ export function buildCategoryTreeWithSums(
 
   // Assign depths and breadcrumb paths
   const flatNodes: CategoryTreeNode[] = [];
-  function assignMetadata(node: CategoryTreeNode, depth: number, ancestorNames: string[]) {
+  function assignMetadata(node: CategoryTreeNode, depth: number, ancestorNames: string[], inExcluded: boolean) {
     node.depth = depth;
     node.pathNames = ancestorNames;
+    node.insideExcluded = inExcluded;
     if (node.id !== null) {
       flatNodes.push(node);
     }
     for (const child of node.children) {
-      assignMetadata(child, depth + 1, [...ancestorNames, child.name]);
+      assignMetadata(child, depth + 1, [...ancestorNames, child.name], inExcluded || node.excluded);
     }
   }
-  assignMetadata(rootNode, 0, ["Root"]);
+  assignMetadata(rootNode, 0, ["Root"], false);
 
   // Accumulate direct transactions onto each node
   for (const tx of transactions) {
     const targetNode =
       tx.categoryId && nodeMap.has(tx.categoryId) ? nodeMap.get(tx.categoryId)! : rootNode;
 
-    const viewed = viewedAmounts(tx, scopeFilter, accountFilterId, accountScopes);
+    const viewed = viewedAmounts(tx, scopeFilter, accountFilter, accountScopes);
     if (!viewed) {
-      // A transfer with all accounts in view adds nothing to the sums, but is still listed
+      // A transfer between two accounts in view adds nothing to the sums, but is still listed
       // (and counted) in its folder.
       if (
         tx.type === "TRANSFER" &&
-        transactionTouchesAccount(tx, accountFilterId) &&
+        transactionTouchesAccount(tx, accountFilter) &&
         matchesPeriod(tx.date, periodMode, selectedYear, selectedMonth)
       ) {
         targetNode.directTransactionCount += 1;
@@ -330,6 +362,8 @@ export function buildCategoryTreeWithSums(
 
     for (const child of node.children) {
       rollUp(child);
+      // An excluded folder keeps its own totals but adds nothing to its parents.
+      if (child.excluded) continue;
       node.totalExpense += child.totalExpense;
       node.totalIncome += child.totalIncome;
       node.totalNet += child.totalNet;
@@ -366,11 +400,13 @@ export function buildCategoryTreeWithSums(
 
 /**
  * Returns the set of category IDs inside `selectedFolderId` (including itself and all descendants).
- * If `selectedFolderId === null` (Root), all categories match.
+ * If `selectedFolderId === null` (Root), all categories match. With `skipExcluded`, excluded
+ * subfolders (and everything inside them) are left out; the start folder itself always counts.
  */
 export function getDescendantCategoryIds(
   selectedFolderId: string | null,
-  nodeMap: Map<string | null, CategoryTreeNode>
+  nodeMap: Map<string | null, CategoryTreeNode>,
+  skipExcluded = false
 ): Set<string | null> {
   const result = new Set<string | null>();
   const startNode = nodeMap.get(selectedFolderId) || nodeMap.get(null);
@@ -378,7 +414,10 @@ export function getDescendantCategoryIds(
 
   function collect(n: CategoryTreeNode) {
     result.add(n.id);
-    for (const c of n.children) collect(c);
+    for (const c of n.children) {
+      if (skipExcluded && c.excluded) continue;
+      collect(c);
+    }
   }
   collect(startNode);
   return result;
@@ -409,6 +448,7 @@ export function getFolderSpendingBreakdown(
   const totalForMode = mode === "EXPENSE" ? activeNode.totalExpense : activeNode.totalIncome;
 
   for (const child of activeNode.children) {
+    if (child.excluded) continue;
     const val = mode === "EXPENSE" ? child.totalExpense : child.totalIncome;
     if (val > 0 || child.totalTransactionCount > 0) {
       items.push({
@@ -483,15 +523,15 @@ function accumulateSeries(
   allowedCategoryIds: Set<string | null>,
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL",
+  accountFilter: AccountFilter,
   accountScopes: Map<string, AccountItem["scope"]>,
   pick: (date: string) => MonthlyChartPoint | null
 ) {
   for (const tx of transactions) {
     if (!includeAllCategories && !allowedCategoryIds.has(tx.categoryId)) continue;
 
-    // Transfers count only with a single account in view (see viewedAmounts).
-    const viewed = viewedAmounts(tx, scopeFilter, accountFilterId, accountScopes);
+    // Transfers count only when one side is out of view (see viewedAmounts).
+    const viewed = viewedAmounts(tx, scopeFilter, accountFilter, accountScopes);
     if (!viewed) continue;
 
     const pt = pick(tx.date);
@@ -516,7 +556,7 @@ export function getYearlyMonthlySeries(
   allowedCategoryIds: Set<string | null>,
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL",
+  accountFilter: AccountFilter,
   accounts: AccountItem[] = []
 ): MonthlyChartPoint[] {
   const points = MONTH_LABELS.map((label, idx) => emptyPoint(idx + 1, label));
@@ -525,7 +565,7 @@ export function getYearlyMonthlySeries(
     allowedCategoryIds,
     includeAllCategories,
     scopeFilter,
-    accountFilterId,
+    accountFilter,
     new Map(accounts.map((a) => [a.id, a.scope])),
     (date) => {
       if (Number(date.slice(0, 4)) !== year) return null;
@@ -549,7 +589,7 @@ export function getMultiYearSeries(
   allowedCategoryIds: Set<string | null>,
   includeAllCategories: boolean,
   scopeFilter: ScopeFilter,
-  accountFilterId: string | "ALL",
+  accountFilter: AccountFilter,
   accounts: AccountItem[] = []
 ): YearlyChartPoint[] {
   let first = currentYear;
@@ -570,7 +610,7 @@ export function getMultiYearSeries(
     allowedCategoryIds,
     includeAllCategories,
     scopeFilter,
-    accountFilterId,
+    accountFilter,
     new Map(accounts.map((a) => [a.id, a.scope])),
     (date) => points[Number(date.slice(0, 4)) - first] ?? null
   );

@@ -28,6 +28,7 @@ import {
   Wallet,
 } from "lucide-react";
 import {
+  AccountFilter,
   AccountItem,
   CategoryItem,
   CategoryTreeNode,
@@ -45,7 +46,9 @@ import {
   localTodayYMD,
   matchesPeriod,
   transactionTouchesAccount,
+  transferDirection,
 } from "@/lib/tree-utils";
+import { AccountFilterPicker, accountFilterLabel, normalizeAccountFilter } from "./AccountFilterPicker";
 import { CategoryTree } from "./CategoryTree";
 import { SpendingCharts } from "./SpendingCharts";
 import { AccountDistributionChart } from "./AccountDistributionChart";
@@ -144,9 +147,39 @@ export function FinFlowApp() {
   const now = useMemo(() => new Date(), []);
   const [selectedYear, setSelectedYear] = useState<number>(now.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState<number>(now.getMonth() + 1);
-  const [accountFilterId, setAccountFilterId] = useState<string | "ALL">("ALL");
+  const [accountFilter, setAccountFilter] = useState<AccountFilter>("ALL");
+  // Folders left out of the sums and charts; remembered per user in this browser.
+  const [excludedFolderIds, setExcludedFolderIds] = useState<ReadonlySet<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [treeWide, setTreeWide] = useState(false);
+
+  const userId = user?.id;
+  const excludedStorageKey = userId ? `finflow.excludedFolders.${userId}` : null;
+  useEffect(() => {
+    let ids: string[] = [];
+    try {
+      const raw = excludedStorageKey ? window.localStorage.getItem(excludedStorageKey) : null;
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) ids = parsed.filter((x): x is string => typeof x === "string");
+    } catch {
+      /* storage unavailable or invalid */
+    }
+    setExcludedFolderIds(new Set(ids));
+  }, [excludedStorageKey]);
+  const saveExcludedFolders = (next: ReadonlySet<string>) => {
+    setExcludedFolderIds(next);
+    try {
+      if (excludedStorageKey) window.localStorage.setItem(excludedStorageKey, JSON.stringify([...next]));
+    } catch {
+      /* storage unavailable */
+    }
+  };
+  const toggleFolderExcluded = (folderId: string) => {
+    const next = new Set(excludedFolderIds);
+    if (next.has(folderId)) next.delete(folderId);
+    else next.add(folderId);
+    saveExcludedFolders(next);
+  };
 
   // Remember the tree layout per browser (a convenience only; ignore storage errors).
   useEffect(() => {
@@ -315,21 +348,35 @@ export function FinFlowApp() {
         periodMode,
         selectedYear,
         selectedMonth,
-        accountFilterId,
+        accountFilter,
         accounts,
+        excludedFolderIds,
       }),
-    [categories, transactions, scopeFilter, periodMode, selectedYear, selectedMonth, accountFilterId, accounts]
+    [
+      categories,
+      transactions,
+      scopeFilter,
+      periodMode,
+      selectedYear,
+      selectedMonth,
+      accountFilter,
+      accounts,
+      excludedFolderIds,
+    ]
   );
+  const excludedFolderCount = useMemo(() => flatNodes.filter((n) => n.excluded).length, [flatNodes]);
 
   const activeNode: CategoryTreeNode = useMemo(
     () => nodeMap.get(selectedFolderId) || rootNode,
     [nodeMap, selectedFolderId, rootNode]
   );
 
+  // Folders counted in the charts and lists: the selected one and its subfolders, without excluded ones.
   const allowedCategoryIds = useMemo(
-    () => getDescendantCategoryIds(selectedFolderId, nodeMap),
+    () => getDescendantCategoryIds(selectedFolderId, nodeMap, true),
     [selectedFolderId, nodeMap]
   );
+  const includeAllCategories = selectedFolderId === null && excludedFolderCount === 0;
 
   const monthlySeries = useMemo(
     () =>
@@ -337,12 +384,12 @@ export function FinFlowApp() {
         transactions,
         selectedYear,
         allowedCategoryIds,
-        selectedFolderId === null,
+        includeAllCategories,
         scopeFilter,
-        accountFilterId,
+        accountFilter,
         accounts
       ),
-    [transactions, selectedYear, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId, accounts]
+    [transactions, selectedYear, allowedCategoryIds, includeAllCategories, scopeFilter, accountFilter, accounts]
   );
 
   const yearlySeries = useMemo(
@@ -351,12 +398,12 @@ export function FinFlowApp() {
         transactions,
         new Date().getFullYear(),
         allowedCategoryIds,
-        selectedFolderId === null,
+        includeAllCategories,
         scopeFilter,
-        accountFilterId,
+        accountFilter,
         accounts
       ),
-    [transactions, allowedCategoryIds, selectedFolderId, scopeFilter, accountFilterId, accounts]
+    [transactions, allowedCategoryIds, includeAllCategories, scopeFilter, accountFilter, accounts]
   );
 
   // Filtered transactions for the table
@@ -364,7 +411,7 @@ export function FinFlowApp() {
     const q = searchQuery.trim().toLowerCase();
     const accountScope = new Map(accounts.map((a) => [a.id, a.scope]));
     return transactions.filter((tx) => {
-      if (!transactionTouchesAccount(tx, accountFilterId)) return false;
+      if (!transactionTouchesAccount(tx, accountFilter)) return false;
       if (!matchesPeriod(tx.date, periodMode, selectedYear, selectedMonth)) return false;
 
       if (tx.type === "TRANSFER") {
@@ -386,6 +433,10 @@ export function FinFlowApp() {
         } else {
           if (tx.categoryId !== selectedFolderId) return false;
         }
+      } else if (excludedFolderCount > 0) {
+        // Root: everything except excluded folders (unknown folders count as Root, like in the tree).
+        const folderId = tx.categoryId && nodeMap.has(tx.categoryId) ? tx.categoryId : null;
+        if (!allowedCategoryIds.has(folderId)) return false;
       }
 
       if (q) {
@@ -403,7 +454,7 @@ export function FinFlowApp() {
     });
   }, [
     transactions,
-    accountFilterId,
+    accountFilter,
     periodMode,
     selectedYear,
     selectedMonth,
@@ -411,6 +462,7 @@ export function FinFlowApp() {
     selectedFolderId,
     includeSubfoldersInTxList,
     allowedCategoryIds,
+    excludedFolderCount,
     searchQuery,
     nodeMap,
     accounts,
@@ -452,7 +504,7 @@ export function FinFlowApp() {
     const today = localTodayYMD();
     const included = accounts.filter(
       (acc) =>
-        (accountFilterId === "ALL" || acc.id === accountFilterId) &&
+        (accountFilter === "ALL" || accountFilter.includes(acc.id)) &&
         (scopeFilter === "ALL" || acc.scope === scopeFilter)
     );
     const ids = new Set(included.map((acc) => acc.id));
@@ -466,15 +518,15 @@ export function FinFlowApp() {
       }
     }
     const label =
-      accountFilterId !== "ALL"
-        ? included[0]?.name ?? "Account"
+      accountFilter !== "ALL"
+        ? accountFilterLabel(accountFilter, accounts)
         : scopeFilter === "ALL"
         ? "All accounts"
         : scopeFilter === "PRIVATE"
         ? "Private accounts"
         : "Business accounts";
     return { amount: Math.round(total * 100) / 100, label, accountCount: included.length };
-  }, [accounts, transactions, accountFilterId, scopeFilter]);
+  }, [accounts, transactions, accountFilter, scopeFilter]);
 
   const currency = user?.currency || "EUR";
 
@@ -697,7 +749,10 @@ export function FinFlowApp() {
       method: "DELETE",
     });
     if (res.ok) {
-      if (accountFilterId === id) setAccountFilterId("ALL");
+      if (accountFilter !== "ALL" && accountFilter.includes(id)) {
+        const rest = accountFilter.filter((x) => x !== id);
+        setAccountFilter(rest.length > 0 ? rest : "ALL");
+      }
       await loadFinanceData();
     }
   };
@@ -962,7 +1017,7 @@ export function FinFlowApp() {
       }
       // All IDs changed: reset selections that point at old records, then reload everything.
       setSelectedFolderId(null);
-      setAccountFilterId("ALL");
+      setAccountFilter("ALL");
       setTxAccountId("");
       setRecAccountId("");
       await checkAuthAndLoad();
@@ -1277,19 +1332,7 @@ export function FinFlowApp() {
               )}
 
               {/* Account Filter */}
-              <select
-                aria-label="Filter by Bank Account"
-                value={accountFilterId}
-                onChange={(e) => setAccountFilterId(e.target.value)}
-                className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-200 max-w-[170px] truncate"
-              >
-                <option value="ALL">All Accounts</option>
-                {accounts.map((acc) => (
-                  <option key={acc.id} value={acc.id}>
-                    {acc.name} ({acc.scope === "BUSINESS" ? "Biz" : "Priv"})
-                  </option>
-                ))}
-              </select>
+              <AccountFilterPicker accounts={accounts} value={accountFilter} onChange={setAccountFilter} />
 
               {/* Primary CTA: Add Transaction */}
               <button
@@ -1445,6 +1488,9 @@ export function FinFlowApp() {
                   currency={currency}
                   wide={treeWide}
                   onToggleWide={toggleTreeWide}
+                  onToggleExcluded={(node) => node.id && toggleFolderExcluded(node.id)}
+                  excludedCount={excludedFolderCount}
+                  onIncludeAll={() => saveExcludedFolders(new Set())}
                 />
               </div>
 
@@ -1518,7 +1564,7 @@ export function FinFlowApp() {
                     currency,
                     openEditTransactionModal,
                     handleDeleteTransaction,
-                    accountFilterId
+                    accountFilter
                   )}
                 </div>
               </div>
@@ -1578,7 +1624,7 @@ export function FinFlowApp() {
                 currency,
                 openEditTransactionModal,
                 handleDeleteTransaction,
-                accountFilterId
+                accountFilter
               )}
             </div>
           )}
@@ -1612,7 +1658,7 @@ export function FinFlowApp() {
                   balances={accountBalances}
                   currency={currency}
                   onSelectAccount={(id) => {
-                    setAccountFilterId(id);
+                    setAccountFilter(normalizeAccountFilter([id], accounts));
                     setActiveTab("transactions");
                   }}
                 />
@@ -1702,7 +1748,7 @@ export function FinFlowApp() {
                       <button
                         type="button"
                         onClick={() => {
-                          setAccountFilterId(acc.id);
+                          setAccountFilter(normalizeAccountFilter([acc.id], accounts));
                           setActiveTab("transactions");
                         }}
                         className="mt-4 w-full py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-xs font-medium text-indigo-300 transition-colors"
@@ -3011,7 +3057,7 @@ function renderResponsiveTransactionsTable(
   currency: string,
   onEdit: (tx: TransactionItem) => void,
   onDelete: (tx: TransactionItem) => void,
-  accountFilterId: string | "ALL" = "ALL"
+  accountFilter: AccountFilter = "ALL"
 ) {
   if (transactions.length === 0) {
     return (
@@ -3052,13 +3098,9 @@ function renderResponsiveTransactionsTable(
             const effectiveAmount = isTransfer
               ? tx.amount
               : getEffectiveTransactionAmount(tx, scopeFilter).effectiveAmount;
-            // Viewing one account: a transfer is money leaving (-) or arriving (+) there.
-            const transferSign =
-              isTransfer && accountFilterId !== "ALL"
-                ? tx.accountId === accountFilterId
-                  ? "-"
-                  : "+"
-                : "";
+            // A transfer leaving (-) or arriving at (+) the accounts in view; none between two of them.
+            const direction = transferDirection(tx, accountFilter);
+            const transferSign = direction === "OUT" ? "-" : direction === "IN" ? "+" : "";
             const privPct = Math.round(100 - tx.businessSharePct);
             const bizPct = Math.round(tx.businessSharePct);
 
